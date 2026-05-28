@@ -1,0 +1,10 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./tmp:/app/tmp
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
