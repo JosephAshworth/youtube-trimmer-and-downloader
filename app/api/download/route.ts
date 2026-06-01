@@ -14,6 +14,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const TMP_DIR = join(process.cwd(), "tmp");
+const YT_DLP_TIMEOUT_MS = 300000;
 
 function ensureTmpDir() {
   if (!existsSync(TMP_DIR)) {
@@ -29,6 +30,83 @@ function cleanup(...files: string[]) {
       // ignore cleanup errors
     }
   }
+}
+
+type YtDlpAttempt = {
+  label: string;
+  args: string[];
+};
+
+async function downloadWithFallbacks(
+  canonicalUrl: string,
+  outputPath: string
+): Promise<void> {
+  const attempts: YtDlpAttempt[] = [
+    {
+      label: "mp4 merged (android/web client)",
+      args: [
+        "-f",
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format",
+        "mp4",
+        "--extractor-args",
+        "youtube:player_client=android,web",
+      ],
+    },
+    {
+      label: "single-file best mp4",
+      args: ["-f", "best[ext=mp4]/best"],
+    },
+    {
+      label: "generic best merged",
+      args: [
+        "-f",
+        "bv*+ba/b",
+        "--merge-output-format",
+        "mp4",
+        "--extractor-args",
+        "youtube:player_client=android,web",
+      ],
+    },
+  ];
+
+  let lastError: unknown;
+
+  for (const attempt of attempts) {
+    try {
+      await execFileAsync(
+        "yt-dlp",
+        [
+          ...attempt.args,
+          "-o",
+          outputPath,
+          "--no-playlist",
+          "--no-warnings",
+          "--retries",
+          "10",
+          "--fragment-retries",
+          "10",
+          "--socket-timeout",
+          "30",
+          "--no-part",
+          canonicalUrl,
+        ],
+        { maxBuffer: 50 * 1024 * 1024, timeout: YT_DLP_TIMEOUT_MS }
+      );
+
+      if (existsSync(outputPath)) return;
+      throw new Error(`yt-dlp attempt "${attempt.label}" completed without output`);
+    } catch (error) {
+      lastError = error;
+      cleanup(outputPath);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? new Error(
+        `yt-dlp failed after multiple fallback attempts. Last error: ${lastError.message}`
+      )
+    : new Error("yt-dlp failed after multiple fallback attempts");
 }
 
 function trimVideo(
@@ -81,27 +159,14 @@ export async function POST(request: NextRequest) {
   if (!videoId) {
     return NextResponse.json({ error: "Invalid YouTube URL" }, { status: 400 });
   }
+  const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   const id = uuidv4();
   const downloadedPath = join(TMP_DIR, `${id}_full.mp4`);
   const trimmedPath = join(TMP_DIR, `${id}_trimmed.mp4`);
 
   try {
-    await execFileAsync(
-      "yt-dlp",
-      [
-        "-f",
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format",
-        "mp4",
-        "-o",
-        downloadedPath,
-        "--no-playlist",
-        "--no-warnings",
-        url,
-      ],
-      { maxBuffer: 50 * 1024 * 1024, timeout: 300000 }
-    );
+    await downloadWithFallbacks(canonicalUrl, downloadedPath);
 
     if (!existsSync(downloadedPath)) {
       throw new Error("Download failed - file not created");
