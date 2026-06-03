@@ -16,6 +16,12 @@ export const maxDuration = 300;
 const TMP_DIR = join(process.cwd(), "tmp");
 const YT_DLP_TIMEOUT_MS = 300000;
 
+/** Prefer 1080p; cap at 1080 if the video has no exact 1080 stream */
+const FORMAT_1080_MP4 =
+  "bestvideo[height=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]";
+const FORMAT_1080_ANY =
+  "bestvideo[height=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]";
+
 function ensureTmpDir() {
   if (!existsSync(TMP_DIR)) {
     mkdirSync(TMP_DIR, { recursive: true });
@@ -41,27 +47,25 @@ async function downloadWithFallbacks(
   canonicalUrl: string,
   outputPath: string
 ): Promise<void> {
+  // Default client first: android,web often exposes only 360p (format 18).
   const attempts: YtDlpAttempt[] = [
     {
-      label: "mp4 merged (android/web client)",
-      args: [
-        "-f",
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format",
-        "mp4",
-        "--extractor-args",
-        "youtube:player_client=android,web",
-      ],
+      label: "1080p merged (default client)",
+      args: ["-f", FORMAT_1080_ANY, "--merge-output-format", "mp4"],
     },
     {
-      label: "single-file best mp4",
-      args: ["-f", "best[ext=mp4]/best"],
+      label: "1080p mp4 merged (default client)",
+      args: ["-f", FORMAT_1080_MP4, "--merge-output-format", "mp4"],
     },
     {
-      label: "generic best merged",
+      label: "1080p single-file (default client)",
+      args: ["-f", "best[height<=1080][ext=mp4]/best[height<=1080]"],
+    },
+    {
+      label: "android/web fallback (may be below 1080)",
       args: [
         "-f",
-        "bv*+ba/b",
+        "best[height<=1080]/best",
         "--merge-output-format",
         "mp4",
         "--extractor-args",
