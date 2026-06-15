@@ -8,9 +8,10 @@ import VideoPlayer from "./components/VideoPlayer";
 import Timeline from "./components/Timeline";
 import TimeInputs from "./components/TimeInputs";
 import PreviewPlayer from "./components/PreviewPlayer";
+import ExportSpeedSelector from "./components/ExportSpeedSelector";
 import { useYouTubePlayer } from "./hooks/useYouTubePlayer";
 import { useTimeRange } from "./hooks/useTimeRange";
-import { THEME_COLORS, type ThemeColor } from "@/lib/utils";
+import { THEME_COLORS, type ExportSpeed, type ThemeColor } from "@/lib/utils";
 
 interface VideoInfo {
   videoId: string;
@@ -28,6 +29,7 @@ export default function Home() {
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [exportSpeed, setExportSpeed] = useState<ExportSpeed>(1);
 
   const player = useYouTubePlayer();
   const timeRange = useTimeRange(videoInfo?.durationMs ?? 0);
@@ -112,6 +114,7 @@ export default function Home() {
           startTime: startMs,
           endTime: endMs,
           title: videoInfo.title,
+          speed: exportSpeed,
         }),
       });
 
@@ -134,7 +137,7 @@ export default function Home() {
     } finally {
       setIsDownloading(false);
     }
-  }, [videoInfo, url, startMs, endMs]);
+  }, [videoInfo, url, startMs, endMs, exportSpeed]);
 
   const handlePreview = useCallback(() => {
     setIsPreviewMode(true);
@@ -222,6 +225,8 @@ export default function Home() {
                   onEndUpdate={setEnd}
                 />
 
+                <ExportSpeedSelector value={exportSpeed} onChange={setExportSpeed} />
+
                 <button
                   type="button"
                   onClick={handlePreview}
@@ -235,6 +240,8 @@ export default function Home() {
                 sourceUrl={url.trim()}
                 startMs={startMs}
                 endMs={endMs}
+                exportSpeed={exportSpeed}
+                onExportSpeedChange={setExportSpeed}
                 onExitPreview={handleExitPreview}
                 onDownload={handleDownload}
                 isDownloading={isDownloading}

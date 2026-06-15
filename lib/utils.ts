@@ -39,8 +39,30 @@ export function clampTime(ms: number, min: number, max: number): number {
 
 export const MIN_GAP_MS = 3000;
 
-/** Applied to preview and download output (VN-style 1.5x with pitch rise) */
-export const DOWNLOAD_SPEED = 1.5;
+export type ExportSpeed = 1 | 1.5;
+
+export const FAST_EXPORT_SPEED = 1.5 as const;
+
+export const EXPORT_SPEED_OPTIONS: { value: ExportSpeed; label: string; hint: string }[] = [
+  { value: 1, label: "Normal speed", hint: "Original pitch and timing" },
+  {
+    value: FAST_EXPORT_SPEED,
+    label: "1.5× speed",
+    hint: "Faster with higher pitch (VN-style)",
+  },
+];
+
+/** @deprecated Use FAST_EXPORT_SPEED */
+export const DOWNLOAD_SPEED = FAST_EXPORT_SPEED;
+
+export function parseExportSpeed(speed: unknown): ExportSpeed | null {
+  if (speed === 1 || speed === FAST_EXPORT_SPEED) return speed;
+  return null;
+}
+
+export function getExportSpeedLabel(speed: ExportSpeed): string {
+  return speed === 1 ? "normal speed" : "1.5× speed";
+}
 
 export function getMinimumGap(durationMs: number): number {
   return Math.min(MIN_GAP_MS, Math.max(0, durationMs));

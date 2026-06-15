@@ -2,13 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import DownloadButton from "./DownloadButton";
+import ExportSpeedSelector from "./ExportSpeedSelector";
 import VolumeControl from "./VolumeControl";
-import { DOWNLOAD_SPEED, formatTimeDisplay } from "@/lib/utils";
+import {
+  type ExportSpeed,
+  FAST_EXPORT_SPEED,
+  formatTimeDisplay,
+  getExportSpeedLabel,
+} from "@/lib/utils";
 
 interface PreviewPlayerProps {
   sourceUrl: string;
   startMs: number;
   endMs: number;
+  exportSpeed: ExportSpeed;
+  onExportSpeedChange: (speed: ExportSpeed) => void;
   onExitPreview: () => void;
   onDownload: () => void;
   isDownloading: boolean;
@@ -18,6 +26,8 @@ export default function PreviewPlayer({
   sourceUrl,
   startMs,
   endMs,
+  exportSpeed,
+  onExportSpeedChange,
   onExitPreview,
   onDownload,
   isDownloading,
@@ -44,6 +54,25 @@ export default function PreviewPlayer({
       setDurationMs(0);
       setIsPlaying(false);
 
+      // #region agent log
+      fetch("http://127.0.0.1:7932/ingest/0ee73f06-2d76-4a1b-8b74-1c95c424e7fc", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "974ac8",
+        },
+        body: JSON.stringify({
+          sessionId: "974ac8",
+          location: "PreviewPlayer.tsx:loadPreview",
+          message: "loading preview",
+          data: { exportSpeed, startMs, endMs },
+          timestamp: Date.now(),
+          hypothesisId: "H2",
+          runId: "pre-fix",
+        }),
+      }).catch(() => {});
+      // #endregion
+
       try {
         const res = await fetch("/api/preview", {
           method: "POST",
@@ -52,6 +81,7 @@ export default function PreviewPlayer({
             url: sourceUrl,
             startTime: startMs,
             endTime: endMs,
+            speed: exportSpeed,
           }),
           signal: controller.signal,
         });
@@ -82,7 +112,7 @@ export default function PreviewPlayer({
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [sourceUrl, startMs, endMs]);
+  }, [sourceUrl, startMs, endMs, exportSpeed]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -93,8 +123,39 @@ export default function PreviewPlayer({
   const handleLoadedMetadata = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    setDurationMs(Math.round(video.duration * 1000));
-  }, []);
+    const loadedMs = Math.round(video.duration * 1000);
+    setDurationMs(loadedMs);
+
+    // #region agent log
+    const sourceClipMs = endMs - startMs;
+    const expectedMs =
+      exportSpeed === 1 ? sourceClipMs : sourceClipMs / FAST_EXPORT_SPEED;
+    fetch("http://127.0.0.1:7932/ingest/0ee73f06-2d76-4a1b-8b74-1c95c424e7fc", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "974ac8",
+      },
+      body: JSON.stringify({
+        sessionId: "974ac8",
+        location: "PreviewPlayer.tsx:loadedmetadata",
+        message: "preview ready",
+        data: {
+          exportSpeed,
+          loadedMs,
+          expectedMs,
+          ratioOk:
+            expectedMs > 0
+              ? Math.abs(loadedMs - expectedMs) / expectedMs < 0.12
+              : false,
+        },
+        timestamp: Date.now(),
+        hypothesisId: "H1,H3",
+        runId: "pre-fix",
+      }),
+    }).catch(() => {});
+    // #endregion
+  }, [endMs, exportSpeed, startMs]);
 
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
@@ -134,14 +195,15 @@ export default function PreviewPlayer({
     return ratio * durationMs;
   };
 
+  const speedLabel = getExportSpeedLabel(exportSpeed);
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-lg font-semibold glow-text">Preview Mode</h3>
           <p className="text-sm text-gray-400">
-            {formatTimeDisplay(startMs)} → {formatTimeDisplay(endMs)} at {DOWNLOAD_SPEED}×
-            (pitch-shifted, same as download)
+            {formatTimeDisplay(startMs)} → {formatTimeDisplay(endMs)} at {speedLabel}
           </p>
         </div>
         <button type="button" onClick={onExitPreview} className="btn-secondary">
@@ -149,9 +211,15 @@ export default function PreviewPlayer({
         </button>
       </div>
 
+      <ExportSpeedSelector
+        value={exportSpeed}
+        onChange={onExportSpeedChange}
+        disabled={isLoadingPreview || isDownloading}
+      />
+
       {isLoadingPreview && (
         <div className="glass-panel p-8 text-center text-gray-400">
-          Processing preview at {DOWNLOAD_SPEED}×…
+          Processing preview at {speedLabel}…
         </div>
       )}
 

@@ -5,7 +5,8 @@ import {
   cleanupFiles,
   createProcessedPaths,
   ensureTmpDir,
-  processVideoToSpedFile,
+  processVideoToOutputFile,
+  validateExportSpeed,
   validateProcessInput,
 } from "@/lib/videoPipeline";
 
@@ -16,28 +17,40 @@ export const maxDuration = 300;
 export async function POST(request: NextRequest) {
   ensureTmpDir();
 
-  let body: { url?: string; startTime?: number; endTime?: number; title?: string };
+  let body: {
+    url?: string;
+    startTime?: number;
+    endTime?: number;
+    title?: string;
+    speed?: number;
+  };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { url, startTime, endTime, title } = body;
+  const { url, startTime, endTime, title, speed } = body;
   const validated = validateProcessInput(url, startTime, endTime);
   if ("error" in validated) {
     return NextResponse.json({ error: validated.error }, { status: validated.status });
+  }
+
+  const speedResult = validateExportSpeed(speed);
+  if ("error" in speedResult) {
+    return NextResponse.json({ error: speedResult.error }, { status: speedResult.status });
   }
 
   const id = uuidv4();
   const processed = createProcessedPaths(id);
 
   try {
-    await processVideoToSpedFile(
+    await processVideoToOutputFile(
       validated.canonicalUrl,
       startTime!,
       endTime!,
-      processed
+      processed,
+      speedResult.speed
     );
 
     const safeTitle = (title ?? "trimmed_video")
@@ -46,9 +59,10 @@ export async function POST(request: NextRequest) {
       .replace(/\s+/g, "_")
       .slice(0, 80);
 
-    const filename = `${safeTitle || "trimmed_video"}.mp4`;
+    const speedSuffix = speedResult.speed === 1 ? "" : "_1.5x";
+    const filename = `${safeTitle || "trimmed_video"}${speedSuffix}.mp4`;
 
-    const stream = createReadStream(processed.spedPath);
+    const stream = createReadStream(processed.outputPath);
     const responseStream = new ReadableStream({
       start(controller) {
         stream.on("data", (chunk) => controller.enqueue(chunk));
@@ -57,7 +71,7 @@ export async function POST(request: NextRequest) {
           cleanupFiles(
             processed.downloadedPath,
             processed.trimmedPath,
-            processed.spedPath
+            processed.outputPath
           );
         });
         stream.on("error", (err) => {
@@ -65,7 +79,7 @@ export async function POST(request: NextRequest) {
           cleanupFiles(
             processed.downloadedPath,
             processed.trimmedPath,
-            processed.spedPath
+            processed.outputPath
           );
         });
       },
@@ -78,7 +92,7 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
-    cleanupFiles(processed.downloadedPath, processed.trimmedPath, processed.spedPath);
+    cleanupFiles(processed.downloadedPath, processed.trimmedPath, processed.outputPath);
     console.error("download error:", error);
     const message =
       error instanceof Error ? error.message : "Failed to download and trim video";

@@ -1,12 +1,13 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { existsSync, mkdirSync, unlinkSync } from "fs";
+import { existsSync, mkdirSync, unlinkSync, copyFileSync } from "fs";
 import { join } from "path";
 import ffmpeg from "fluent-ffmpeg";
 import {
-  DOWNLOAD_SPEED,
+  type ExportSpeed,
   extractYouTubeVideoId,
   msToFfmpegTimestamp,
+  parseExportSpeed,
 } from "@/lib/utils";
 
 const execFileAsync = promisify(execFile);
@@ -23,7 +24,7 @@ export interface ProcessedVideoPaths {
   id: string;
   downloadedPath: string;
   trimmedPath: string;
-  spedPath: string;
+  outputPath: string;
 }
 
 export interface ProcessVideoInput {
@@ -67,6 +68,16 @@ export function validateProcessInput(
     canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
     videoId,
   };
+}
+
+export function validateExportSpeed(
+  speed: unknown
+): { speed: ExportSpeed } | { error: string; status: number } {
+  const parsed = parseExportSpeed(speed ?? 1);
+  if (parsed === null) {
+    return { error: "Invalid speed. Use 1 (normal) or 1.5 (fast).", status: 400 };
+  }
+  return { speed: parsed };
 }
 
 type YtDlpAttempt = {
@@ -188,11 +199,10 @@ function probeAudioSampleRate(filePath: string): Promise<number> {
   });
 }
 
-/** VN-style speed: faster playback with pitch rising (keepAudioPitch=false). */
 function speedVideo(
   inputPath: string,
   outputPath: string,
-  speed: number = DOWNLOAD_SPEED
+  speed: number
 ): Promise<void> {
   return Promise.all([probeHasAudio(inputPath), probeAudioSampleRate(inputPath)]).then(
     ([hasAudio, sampleRate]) => {
@@ -220,15 +230,16 @@ export function createProcessedPaths(id: string): ProcessedVideoPaths {
     id,
     downloadedPath: join(TMP_DIR, `${id}_full.mp4`),
     trimmedPath: join(TMP_DIR, `${id}_trimmed.mp4`),
-    spedPath: join(TMP_DIR, `${id}_1.5x.mp4`),
+    outputPath: join(TMP_DIR, `${id}_output.mp4`),
   };
 }
 
-export async function processVideoToSpedFile(
+export async function processVideoToOutputFile(
   canonicalUrl: string,
   startTime: number,
   endTime: number,
-  paths: ProcessedVideoPaths
+  paths: ProcessedVideoPaths,
+  speed: ExportSpeed
 ): Promise<void> {
   await downloadWithFallbacks(canonicalUrl, paths.downloadedPath);
   if (!existsSync(paths.downloadedPath)) {
@@ -240,8 +251,13 @@ export async function processVideoToSpedFile(
     throw new Error("Trim failed - output file not created");
   }
 
-  await speedVideo(paths.trimmedPath, paths.spedPath, DOWNLOAD_SPEED);
-  if (!existsSync(paths.spedPath)) {
-    throw new Error("Speed adjustment failed - output file not created");
+  if (speed === 1) {
+    copyFileSync(paths.trimmedPath, paths.outputPath);
+  } else {
+    await speedVideo(paths.trimmedPath, paths.outputPath, speed);
+  }
+
+  if (!existsSync(paths.outputPath)) {
+    throw new Error("Output file not created");
   }
 }
