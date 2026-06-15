@@ -138,8 +138,7 @@ export default function Home() {
 
   const handlePreview = useCallback(() => {
     setIsPreviewMode(true);
-    seekTo(startMs);
-  }, [seekTo, startMs]);
+  }, []);
 
   const handleExitPreview = useCallback(() => {
     setIsPreviewMode(false);
@@ -233,18 +232,9 @@ export default function Home() {
               </>
             ) : (
               <PreviewPlayer
-                videoId={videoInfo.videoId}
+                sourceUrl={url.trim()}
                 startMs={startMs}
                 endMs={endMs}
-                currentTimeMs={playerState.currentTime}
-                isPlaying={playerState.isPlaying}
-                volume={playerState.volume}
-                onReady={(e) => onReady(e.target)}
-                onStateChange={(e) => onStateChange(e)}
-                onTogglePlay={togglePlay}
-                onSkip={skip}
-                onSeek={seekTo}
-                onVolumeChange={setVolume}
                 onExitPreview={handleExitPreview}
                 onDownload={handleDownload}
                 isDownloading={isDownloading}

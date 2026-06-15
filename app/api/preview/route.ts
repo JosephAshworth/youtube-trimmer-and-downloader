@@ -16,14 +16,14 @@ export const maxDuration = 300;
 export async function POST(request: NextRequest) {
   ensureTmpDir();
 
-  let body: { url?: string; startTime?: number; endTime?: number; title?: string };
+  let body: { url?: string; startTime?: number; endTime?: number };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { url, startTime, endTime, title } = body;
+  const { url, startTime, endTime } = body;
   const validated = validateProcessInput(url, startTime, endTime);
   if ("error" in validated) {
     return NextResponse.json({ error: validated.error }, { status: validated.status });
@@ -39,14 +39,6 @@ export async function POST(request: NextRequest) {
       endTime!,
       processed
     );
-
-    const safeTitle = (title ?? "trimmed_video")
-      .replace(/[^a-zA-Z0-9_\-\s]/g, "")
-      .trim()
-      .replace(/\s+/g, "_")
-      .slice(0, 80);
-
-    const filename = `${safeTitle || "trimmed_video"}.mp4`;
 
     const stream = createReadStream(processed.spedPath);
     const responseStream = new ReadableStream({
@@ -74,14 +66,14 @@ export async function POST(request: NextRequest) {
     return new NextResponse(responseStream, {
       headers: {
         "Content-Type": "video/mp4",
-        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Cache-Control": "no-store",
       },
     });
   } catch (error) {
     cleanupFiles(processed.downloadedPath, processed.trimmedPath, processed.spedPath);
-    console.error("download error:", error);
+    console.error("preview error:", error);
     const message =
-      error instanceof Error ? error.message : "Failed to download and trim video";
+      error instanceof Error ? error.message : "Failed to generate preview video";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -39,6 +39,9 @@ export function clampTime(ms: number, min: number, max: number): number {
 
 export const MIN_GAP_MS = 3000;
 
+/** Applied to preview and download output (VN-style 1.5x with pitch rise) */
+export const DOWNLOAD_SPEED = 1.5;
+
 export function getMinimumGap(durationMs: number): number {
   return Math.min(MIN_GAP_MS, Math.max(0, durationMs));
 }
