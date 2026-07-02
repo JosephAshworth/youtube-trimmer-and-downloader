@@ -621,7 +621,7 @@ export default function Home() {
               YouTube Trimmer
             </h1>
             <p className="text-gray-400 mt-1 text-sm sm:text-base">
-              Trim, preview, and download any YouTube video
+              Trim, preview, and download any YouTube video — fast. — fast.
             </p>
           </div>
           <ColorPicker selected={theme} onChange={setTheme} />
