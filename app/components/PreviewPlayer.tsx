@@ -3,23 +3,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import DownloadButton from "./DownloadButton";
 import ExportSpeedSelector from "./ExportSpeedSelector";
+import LiveProgressBar from "./LiveProgressBar";
 import VolumeControl from "./VolumeControl";
 import {
   type ExportSpeed,
-  FAST_EXPORT_SPEED,
   formatTimeDisplay,
   getExportSpeedLabel,
 } from "@/lib/utils";
+import { waitForJobProgress } from "../lib/jobProgressClient";
 
 interface PreviewPlayerProps {
   sourceUrl: string;
   startMs: number;
   endMs: number;
   exportSpeed: ExportSpeed;
+  sessionId: string;
+  resumeJobId?: string | null;
+  onJobStarted?: (jobId: string) => void;
+  onSettled?: () => void;
   onExportSpeedChange: (speed: ExportSpeed) => void;
   onExitPreview: () => void;
   onDownload: () => void;
-  isDownloading: boolean;
+  isQueueingDownload: boolean;
 }
 
 export default function PreviewPlayer({
@@ -27,16 +32,33 @@ export default function PreviewPlayer({
   startMs,
   endMs,
   exportSpeed,
+  sessionId,
+  resumeJobId = null,
+  onJobStarted,
+  onSettled,
   onExportSpeedChange,
   onExitPreview,
   onDownload,
-  isDownloading,
+  isQueueingDownload,
 }: PreviewPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timelineRef = useRef<HTMLInputElement | null>(null);
+  // Consume the resume jobId at most once; later param changes start fresh jobs.
+  const resumeJobIdRef = useRef<string | null>(resumeJobId ?? null);
+  const resumeConsumedRef = useRef(false);
+  // Keep latest callbacks in refs so the load effect doesn't re-run (and abort
+  // an in-progress preview) just because a parent callback identity changed.
+  const onJobStartedRef = useRef(onJobStarted);
+  const onSettledRef = useRef(onSettled);
+  useEffect(() => {
+    onJobStartedRef.current = onJobStarted;
+    onSettledRef.current = onSettled;
+  }, [onJobStarted, onSettled]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(true);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewProgress, setPreviewProgress] = useState(0);
+  const [previewMessage, setPreviewMessage] = useState("Preparing preview...");
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [durationMs, setDurationMs] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -47,58 +69,93 @@ export default function PreviewPlayer({
     let objectUrl: string | null = null;
 
     const loadPreview = async () => {
+      // Only the first run after mount may re-attach to a persisted job; any
+      // later run (params changed) starts a brand-new preview job.
+      const resumeId = resumeConsumedRef.current ? null : resumeJobIdRef.current;
+      resumeConsumedRef.current = true;
+
       setIsLoadingPreview(true);
       setPreviewError(null);
       setPreviewUrl(null);
       setCurrentTimeMs(0);
       setDurationMs(0);
       setIsPlaying(false);
-
-      // #region agent log
-      fetch("http://127.0.0.1:7932/ingest/0ee73f06-2d76-4a1b-8b74-1c95c424e7fc", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "974ac8",
-        },
-        body: JSON.stringify({
-          sessionId: "974ac8",
-          location: "PreviewPlayer.tsx:loadPreview",
-          message: "loading preview",
-          data: { exportSpeed, startMs, endMs },
-          timestamp: Date.now(),
-          hypothesisId: "H2",
-          runId: "pre-fix",
-        }),
-      }).catch(() => {});
-      // #endregion
+      setPreviewProgress(1);
+      setPreviewMessage(resumeId ? "Resuming preview..." : "Preparing preview...");
 
       try {
-        const res = await fetch("/api/preview", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: sourceUrl,
-            startTime: startMs,
-            endTime: endMs,
-            speed: exportSpeed,
-          }),
-          signal: controller.signal,
-        });
-
-        if (!res.ok) {
-          const data = await res.json();
-          throw new Error(data.error ?? "Failed to load preview");
+        let jobId: string;
+        if (resumeId) {
+          jobId = resumeId;
+        } else {
+          const startRes = await fetch("/api/process/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              url: sourceUrl,
+              startTime: startMs,
+              endTime: endMs,
+              speed: exportSpeed,
+              sessionId,
+            }),
+            signal: controller.signal,
+          });
+          const startData = await startRes.json();
+          if (!startRes.ok || !startData.jobId) {
+            throw new Error(startData.error ?? "Failed to start preview");
+          }
+          jobId = String(startData.jobId);
+          onJobStartedRef.current?.(jobId);
         }
 
+        await waitForJobProgress(jobId, {
+          signal: controller.signal,
+          onProgress: (snapshot) => {
+            if (!snapshot.progress) return;
+            setPreviewProgress(Number(snapshot.progress.percent ?? 0));
+            setPreviewMessage(String(snapshot.progress.message ?? "Processing preview..."));
+          },
+        });
+
+        // Retry the file fetch: a briefly-backgrounded tab can hit transient
+        // network drops right as the file becomes available.
+        let res: Response | null = null;
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (controller.signal.aborted) return;
+          try {
+            res = await fetch(`/api/process/file/${jobId}`, {
+              cache: "no-store",
+              signal: controller.signal,
+            });
+            break;
+          } catch (fetchError) {
+            if (controller.signal.aborted) return;
+            lastError = fetchError;
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        }
+        if (!res) {
+          throw new Error(
+            lastError instanceof Error ? lastError.message : "Failed to load preview"
+          );
+        }
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error ?? "Failed to load preview");
+        }
         const blob = await res.blob();
         objectUrl = URL.createObjectURL(blob);
         setPreviewUrl(objectUrl);
+        setPreviewProgress(100);
+        setPreviewMessage("Preview ready");
+        onSettledRef.current?.();
       } catch (err) {
         if (controller.signal.aborted) return;
         setPreviewError(
           err instanceof Error ? err.message : "Failed to load preview"
         );
+        onSettledRef.current?.();
       } finally {
         if (!controller.signal.aborted) {
           setIsLoadingPreview(false);
@@ -112,7 +169,7 @@ export default function PreviewPlayer({
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [sourceUrl, startMs, endMs, exportSpeed]);
+  }, [sourceUrl, startMs, endMs, exportSpeed, sessionId]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -125,37 +182,7 @@ export default function PreviewPlayer({
     if (!video) return;
     const loadedMs = Math.round(video.duration * 1000);
     setDurationMs(loadedMs);
-
-    // #region agent log
-    const sourceClipMs = endMs - startMs;
-    const expectedMs =
-      exportSpeed === 1 ? sourceClipMs : sourceClipMs / FAST_EXPORT_SPEED;
-    fetch("http://127.0.0.1:7932/ingest/0ee73f06-2d76-4a1b-8b74-1c95c424e7fc", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "974ac8",
-      },
-      body: JSON.stringify({
-        sessionId: "974ac8",
-        location: "PreviewPlayer.tsx:loadedmetadata",
-        message: "preview ready",
-        data: {
-          exportSpeed,
-          loadedMs,
-          expectedMs,
-          ratioOk:
-            expectedMs > 0
-              ? Math.abs(loadedMs - expectedMs) / expectedMs < 0.12
-              : false,
-        },
-        timestamp: Date.now(),
-        hypothesisId: "H1,H3",
-        runId: "pre-fix",
-      }),
-    }).catch(() => {});
-    // #endregion
-  }, [endMs, exportSpeed, startMs]);
+  }, []);
 
   const handleTimeUpdate = useCallback(() => {
     const video = videoRef.current;
@@ -214,13 +241,16 @@ export default function PreviewPlayer({
       <ExportSpeedSelector
         value={exportSpeed}
         onChange={onExportSpeedChange}
-        disabled={isLoadingPreview || isDownloading}
+        disabled={isLoadingPreview || isQueueingDownload}
       />
 
       {isLoadingPreview && (
-        <div className="glass-panel p-8 text-center text-gray-400">
-          Processing preview at {speedLabel}…
-        </div>
+        <LiveProgressBar
+          title={`Generating Preview (${speedLabel})`}
+          message={previewMessage}
+          percent={previewProgress}
+          active={isLoadingPreview}
+        />
       )}
 
       {previewError && (
@@ -315,7 +345,7 @@ export default function PreviewPlayer({
         </>
       )}
 
-      <DownloadButton onDownload={onDownload} isDownloading={isDownloading} />
+      <DownloadButton onDownload={onDownload} isDownloading={isQueueingDownload} />
     </div>
   );
 }

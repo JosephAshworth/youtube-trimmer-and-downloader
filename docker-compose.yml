@@ -5,6 +5,9 @@ services:
       - "3000:3000"
     volumes:
       - ./tmp:/app/tmp
+    env_file:
+      - path: .env.local
+        required: false
     environment:
       - NODE_ENV=production
     restart: unless-stopped

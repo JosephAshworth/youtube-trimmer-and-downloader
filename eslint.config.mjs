@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Standalone Node/CommonJS worker service with its own runtime + toolchain.
+    "worker/**",
   ]),
 ]);
 

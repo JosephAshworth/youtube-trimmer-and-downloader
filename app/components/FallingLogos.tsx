@@ -1,10 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useMemo } from "react";
 import { motion } from "framer-motion";
 
 interface FallingLogosProps {
   color: string;
+}
+
+function roundTo(value: number, decimals: number): number {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
 }
 
 function YouTubeLogoIcon({ color, size }: { color: string; size: number }) {
@@ -23,82 +28,37 @@ function YouTubeLogoIcon({ color, size }: { color: string; size: number }) {
   );
 }
 
+function pseudoRandom(seed: number): number {
+  const x = Math.sin(seed * 12.9898) * 43758.5453;
+  return x - Math.floor(x);
+}
+
 function distributeDelays(count: number, maxDelay: number): number[] {
   const delays = Array.from({ length: count }, (_, i) => (i / count) * maxDelay);
   for (let i = delays.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(pseudoRandom(i + 1) * (i + 1));
     [delays[i], delays[j]] = [delays[j], delays[i]];
   }
   return delays;
 }
 
 export default function FallingLogos({ color }: FallingLogosProps) {
-  const [logos, setLogos] = useState<
-    Array<{
-      id: number;
-      left: string;
-      size: number;
-      duration: number;
-      delay: number;
-      spinDuration: number;
-    }>
-  >([]);
-  const [offsetX, setOffsetX] = useState(0);
-  const targetOffsetRef = useRef(0);
-  const currentOffsetRef = useRef(0);
-  const rafRef = useRef<number | null>(null);
-
-  useEffect(() => {
+  const logos = useMemo(() => {
     const count = 18;
     const maxDelay = 12;
     const delays = distributeDelays(count, maxDelay);
-    const nextLogos = Array.from({ length: count }, (_, i) => ({
+    return Array.from({ length: count }, (_, i) => ({
       id: i,
-      left: `${Math.random() * 100}%`,
-      size: 24 + Math.random() * 32,
-      duration: 8 + Math.random() * 12,
-      delay: delays[i] + Math.random() * 1.2,
-      spinDuration: 3 + Math.random() * 4,
+      left: `${roundTo(pseudoRandom(i * 11 + 1) * 100, 4)}%`,
+      size: roundTo(24 + pseudoRandom(i * 11 + 2) * 32, 4),
+      duration: roundTo(8 + pseudoRandom(i * 11 + 3) * 12, 4),
+      delay: roundTo(delays[i] + pseudoRandom(i * 11 + 4) * 1.2, 4),
+      spinDuration: roundTo(3 + pseudoRandom(i * 11 + 5) * 4, 4),
     }));
-    setLogos(nextLogos);
-  }, []);
-
-  useEffect(() => {
-    const isFinePointer =
-      typeof window !== "undefined" &&
-      window.matchMedia &&
-      window.matchMedia("(pointer: fine)").matches;
-
-    if (!isFinePointer) return;
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const ratio = event.clientX / Math.max(1, window.innerWidth);
-      targetOffsetRef.current = (ratio - 0.5) * 55;
-    };
-
-    const animate = () => {
-      const current = currentOffsetRef.current;
-      const target = targetOffsetRef.current;
-      const next = current + (target - current) * 0.08;
-      currentOffsetRef.current = next;
-      setOffsetX(next);
-      rafRef.current = requestAnimationFrame(animate);
-    };
-
-    window.addEventListener("pointermove", handlePointerMove, { passive: true });
-    rafRef.current = requestAnimationFrame(animate);
-
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
   }, []);
 
   return (
-    <div
-      className="pointer-events-none fixed inset-0 overflow-hidden z-0"
-      style={{ transform: `translateX(${offsetX}px)` }}
-    >
+    <div className="pointer-events-none fixed inset-0 overflow-hidden z-0">
       {logos.map((logo) => (
         <motion.div
           key={logo.id}

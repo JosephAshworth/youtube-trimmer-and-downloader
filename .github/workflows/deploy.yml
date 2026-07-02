@@ -1,0 +1,41 @@
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ecs-deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::949160680094:role/github-actions-ecs-deploy
+          aws-region: eu-west-1
+
+      - name: Build, push, and deploy
+        env:
+          AWS_REGION: eu-west-1
+          AWS_ACCOUNT_ID: "949160680094"
+          ECR_REPOSITORY: youtube-trimmer
+          ECS_CLUSTER: yt-trimmer-cluster
+          ECS_SERVICE: youtube-trimmer-service
+          ECS_TASK_FAMILY: youtube-trimmer-task
+          CONTAINER_NAME: youtube-trimmer
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          chmod +x scripts/deploy-aws-ecs.sh
+          ./scripts/deploy-aws-ecs.sh

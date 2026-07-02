@@ -19,6 +19,13 @@ export function useTimeRange(durationMs: number) {
     setEndMs(duration);
   }, []);
 
+  // Restore an exact, previously-valid range (e.g. resuming a persisted
+  // session) without applying the interactive clamping used by setStart/setEnd.
+  const setRange = useCallback((start: number, end: number) => {
+    setStartMs(Math.max(0, start));
+    setEndMs(Math.max(0, end));
+  }, []);
+
   const setStart = useCallback(
     (ms: number) => {
       const maxStart = Math.max(endMs - minGap, 0);
@@ -64,5 +71,6 @@ export function useTimeRange(durationMs: number) {
     setStartFromParts,
     setEndFromParts,
     initRange,
+    setRange,
   };
 }

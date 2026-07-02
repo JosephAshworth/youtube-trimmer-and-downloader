@@ -37,14 +37,14 @@ export default function DownloadButton({
               d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
             />
           </svg>
-          Trimming & Downloading...
+          Starting Download Job...
         </>
       ) : (
         <>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
             <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
           </svg>
-          Download Trimmed Video
+          Queue This Video Download
         </>
       )}
     </button>

@@ -47,25 +47,6 @@ export async function POST(request: NextRequest) {
       speedResult.speed
     );
 
-    // #region agent log
-    fetch("http://127.0.0.1:7932/ingest/0ee73f06-2d76-4a1b-8b74-1c95c424e7fc", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "974ac8",
-      },
-      body: JSON.stringify({
-        sessionId: "974ac8",
-        location: "preview/route.ts:POST",
-        message: "preview processed",
-        data: { speed: speedResult.speed, clipMs: endTime! - startTime! },
-        timestamp: Date.now(),
-        hypothesisId: "H1",
-        runId: "pre-fix",
-      }),
-    }).catch(() => {});
-    // #endregion
-
     const stream = createReadStream(processed.outputPath);
     const responseStream = new ReadableStream({
       start(controller) {

@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { extractYouTubeVideoId } from "@/lib/utils";
+import {
+  formatYtDlpAuthHint,
+  getYtDlpAuthArgs,
+  logYtDlpFailure,
+} from "@/lib/ytDlpAuth";
+import { fetchVideoInfoFromWorker, isWorkerEnabled } from "@/lib/ytDlpWorker";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +22,11 @@ interface YtDlpOutput {
   uploader?: string;
 }
 
+type VideoInfoAttempt = {
+  label: string;
+  args: string[];
+};
+
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
 
@@ -28,17 +39,72 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid YouTube URL" }, { status: 400 });
   }
 
+  const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  if (isWorkerEnabled()) {
+    try {
+      const info = await fetchVideoInfoFromWorker(canonicalUrl);
+      return NextResponse.json(info);
+    } catch (error) {
+      console.error("video-info worker error:", error);
+      logYtDlpFailure("video-info/route.ts:GET:worker", error, {
+        url: canonicalUrl,
+      });
+      const message = formatYtDlpAuthHint(
+        error instanceof Error ? error.message : "Failed to fetch video info"
+      );
+      return NextResponse.json({ error: message }, { status: 502 });
+    }
+  }
+
   try {
-    const { stdout } = await execFileAsync(
-      "yt-dlp",
-      [
-        "--dump-json",
-        "--no-playlist",
-        "--no-warnings",
-        url,
-      ],
-      { maxBuffer: 10 * 1024 * 1024, timeout: 60000 }
-    );
+    const authArgs = getYtDlpAuthArgs();
+    const attempts: VideoInfoAttempt[] = [
+      {
+        label: "default client",
+        args: [],
+      },
+      {
+        label: "android/web client fallback",
+        args: ["--extractor-args", "youtube:player_client=android,web"],
+      },
+      {
+        label: "android_vr client fallback",
+        args: ["--extractor-args", "youtube:player_client=android_vr,android,web"],
+      },
+    ];
+
+    let lastError: unknown;
+    let stdout = "";
+
+    for (const attempt of attempts) {
+      try {
+        const result = await execFileAsync(
+          "yt-dlp",
+          [
+            ...authArgs,
+            ...attempt.args,
+            "--dump-json",
+            "--no-playlist",
+            "--no-warnings",
+            canonicalUrl,
+          ],
+          { maxBuffer: 10 * 1024 * 1024, timeout: 60000 }
+        );
+        stdout = result.stdout;
+        break;
+      } catch (error) {
+        lastError = error;
+        logYtDlpFailure("video-info/route.ts:GET:attempt", error, {
+          url: canonicalUrl,
+          attempt: attempt.label,
+        });
+      }
+    }
+
+    if (!stdout) {
+      throw lastError ?? new Error("Failed to fetch video info");
+    }
 
     const data = JSON.parse(stdout) as YtDlpOutput;
 
@@ -52,8 +118,10 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("video-info error:", error);
-    const message =
-      error instanceof Error ? error.message : "Failed to fetch video info";
+    logYtDlpFailure("video-info/route.ts:GET", error, { url: canonicalUrl });
+    const message = formatYtDlpAuthHint(
+      error instanceof Error ? error.message : "Failed to fetch video info"
+    );
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

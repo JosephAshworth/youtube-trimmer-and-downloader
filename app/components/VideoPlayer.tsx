@@ -24,7 +24,6 @@ interface VideoPlayerProps {
   onPreviewEnd?: () => void;
   useNativeControls?: boolean;
   showCustomTimeline?: boolean;
-  showTrimTimeOverlay?: boolean;
 }
 
 export default function VideoPlayer({
@@ -46,7 +45,6 @@ export default function VideoPlayer({
   onPreviewEnd,
   useNativeControls = true,
   showCustomTimeline = true,
-  showTrimTimeOverlay = false,
 }: VideoPlayerProps) {
   const playerRef = useRef<YouTubePlayer | null>(null);
   const timelineRef = useRef<HTMLInputElement | null>(null);
@@ -166,7 +164,7 @@ export default function VideoPlayer({
                   setHoverTime(null);
                 }}
               />
-              {hoverTime !== null && timelineRef.current && (
+              {hoverTime !== null && (
                 <div
                   className="absolute -top-8 px-2 py-1 rounded bg-black/80 text-xs text-white font-mono pointer-events-none"
                   style={{
