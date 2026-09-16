@@ -76,17 +76,39 @@ export async function GET(request: NextRequest, { params }: Params) {
 
   const download = request.nextUrl.searchParams.get("download") === "1";
   const stream = createReadStream(file.outputPath);
+  let cleanedUp = false;
+  let streamEnded = false;
+
+  const cleanupOnce = (reason: string) => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    cleanupJob(jobId, { cleanupRelatedVideo: download });
+    cleanupFiles(
+      fallbackPaths.downloadedPath,
+      fallbackPaths.trimmedPath,
+      fallbackPaths.outputPath
+    );
+    if (reason !== "completed") {
+      debugLog("H3,H5", "process-file/route.ts:cleanup", "cleaned after non-end path", {
+        jobId,
+        reason,
+        download,
+      });
+    }
+  };
+
   const responseStream = new ReadableStream({
     start(controller) {
       stream.on("data", (chunk) => controller.enqueue(chunk));
       stream.on("end", () => {
+        streamEnded = true;
         controller.close();
-        cleanupJob(jobId, { cleanupRelatedVideo: download });
-        cleanupFiles(
-          fallbackPaths.downloadedPath,
-          fallbackPaths.trimmedPath,
-          fallbackPaths.outputPath
-        );
+        cleanupOnce("completed");
+      });
+      // Some clients disconnect without a clean "end"; still clean tmp files.
+      stream.on("close", () => {
+        if (streamEnded) return;
+        cleanupOnce("stream_closed");
       });
       stream.on("error", (err) => {
         debugLog("H3,H5", "process-file/route.ts:stream", "stream open/read failed", {
@@ -95,13 +117,13 @@ export async function GET(request: NextRequest, { params }: Params) {
           error: err instanceof Error ? err.message.slice(0, 300) : String(err),
         });
         controller.error(err);
-        cleanupJob(jobId);
-        cleanupFiles(
-          fallbackPaths.downloadedPath,
-          fallbackPaths.trimmedPath,
-          fallbackPaths.outputPath
-        );
+        cleanupOnce("stream_error");
       });
+    },
+    cancel() {
+      // Browser cancelled the response (tab close/navigation); ensure cleanup.
+      stream.destroy();
+      cleanupOnce("client_cancelled");
     },
   });
 

@@ -16,6 +16,7 @@ export async function POST(request: NextRequest) {
     title?: string;
     speed?: number;
     sessionId?: string;
+    kind?: "preview" | "download";
   };
   try {
     body = await request.json();
@@ -23,7 +24,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { url, startTime, endTime, title, speed, sessionId } = body;
+  const { url, startTime, endTime, title, speed, sessionId, kind } = body;
   const validated = validateProcessInput(url, startTime, endTime);
   if ("error" in validated) {
     return NextResponse.json({ error: validated.error }, { status: validated.status });
@@ -41,6 +42,7 @@ export async function POST(request: NextRequest) {
     speed: speedResult.speed,
     title,
     sessionId,
+    kind: kind === "preview" ? "preview" : "download",
   });
 
   return NextResponse.json({ jobId });

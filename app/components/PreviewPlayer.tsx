@@ -97,6 +97,7 @@ export default function PreviewPlayer({
               endTime: endMs,
               speed: exportSpeed,
               sessionId,
+              kind: "preview",
             }),
             signal: controller.signal,
           });
@@ -241,7 +242,7 @@ export default function PreviewPlayer({
       <ExportSpeedSelector
         value={exportSpeed}
         onChange={onExportSpeedChange}
-        disabled={isLoadingPreview || isQueueingDownload}
+        disabled={isLoadingPreview}
       />
 
       {isLoadingPreview && (

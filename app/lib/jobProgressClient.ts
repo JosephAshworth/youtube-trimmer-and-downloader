@@ -1,5 +1,5 @@
 export interface JobProgressSnapshot {
-  status: "processing" | "completed" | "failed";
+  status: "queued" | "processing" | "completed" | "failed";
   progress?: {
     percent?: number;
     message?: string;

@@ -29,7 +29,7 @@ interface VideoInfo {
   uploader: string;
 }
 
-type DownloadTaskStatus = "starting" | "processing" | "ready" | "failed";
+type DownloadTaskStatus = "starting" | "queued" | "processing" | "ready" | "failed";
 
 interface DownloadTask {
   id: string;
@@ -43,6 +43,13 @@ interface DownloadTask {
   fileUrl: string | null;
   filename: string;
   error: string | null;
+}
+
+interface ProcessingStatus {
+  maxConcurrentJobs: number;
+  processingJobs: number;
+  queuedJobs: number;
+  availableSlots: number;
 }
 
 // Active jobs are persisted so that processing/download survives a backgrounded
@@ -146,6 +153,7 @@ export default function Home() {
   const [resumePreviewJobId, setResumePreviewJobId] = useState<string | null>(null);
   const [tmpCleanupStatus, setTmpCleanupStatus] = useState<string>("Checking tmp cleanup...");
   const [tmpCleanupOk, setTmpCleanupOk] = useState<boolean>(true);
+  const [processingStatus, setProcessingStatus] = useState<ProcessingStatus | null>(null);
   const [sessionId] = useState(() =>
     typeof window === "undefined" ? "ssr-session" : crypto.randomUUID()
   );
@@ -171,19 +179,30 @@ export default function Home() {
   // the tab (or switching apps on mobile) must let processing + download
   // continue. Server-side jobs self-expire via their own TTL.
 
+  const hasActiveJobs =
+    startingDownloadCount > 0 ||
+    downloadTasks.some(
+      (task) =>
+        task.status === "starting" ||
+        task.status === "queued" ||
+        task.status === "processing"
+    );
+
   useEffect(() => {
     let cancelled = false;
-    const checkTmpStatus = async () => {
+    const checkRuntimeStatus = async () => {
       try {
-        const response = await fetch("/api/process/tmp-status", {
-          cache: "no-store",
-        });
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error ?? "Failed to check tmp status");
+        const [tmpResponse, processResponse] = await Promise.all([
+          fetch("/api/process/tmp-status", { cache: "no-store" }),
+          fetch("/api/process/status", { cache: "no-store" }),
+        ]);
+        const tmpData = await tmpResponse.json();
+        const processData = await processResponse.json();
+        if (!tmpResponse.ok) {
+          throw new Error(tmpData.error ?? "Failed to check tmp status");
         }
         if (cancelled) return;
-        const count = Number(data.fileCount ?? 0);
+        const count = Number(tmpData.fileCount ?? 0);
         if (count === 0) {
           setTmpCleanupOk(true);
           setTmpCleanupStatus("Tmp cleanup verified: folder is empty.");
@@ -191,17 +210,34 @@ export default function Home() {
           setTmpCleanupOk(false);
           setTmpCleanupStatus(`Tmp cleanup warning: ${count} file(s) currently present.`);
         }
+        if (processResponse.ok) {
+          setProcessingStatus({
+            maxConcurrentJobs: Number(processData.maxConcurrentJobs ?? 0),
+            processingJobs: Number(processData.processingJobs ?? 0),
+            queuedJobs: Number(processData.queuedJobs ?? 0),
+            availableSlots: Number(processData.availableSlots ?? 0),
+          });
+        }
       } catch {
         if (cancelled) return;
         setTmpCleanupOk(false);
         setTmpCleanupStatus("Tmp cleanup status unavailable.");
       }
     };
-    void checkTmpStatus();
+    void checkRuntimeStatus();
+    if (!hasActiveJobs) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const interval = setInterval(() => {
+      void checkRuntimeStatus();
+    }, 3000);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
-  }, []);
+  }, [hasActiveJobs]);
 
   const updateTask = useCallback((taskId: string, updater: (task: DownloadTask) => DownloadTask) => {
     setDownloadTasks((current) =>
@@ -279,7 +315,12 @@ export default function Home() {
             if (!snapshot.progress) return;
             updateTask(taskId, (task) => ({
               ...task,
-              status: snapshot.status === "processing" ? "processing" : task.status,
+              status:
+                snapshot.status === "processing"
+                  ? "processing"
+                  : snapshot.status === "queued"
+                    ? "queued"
+                    : task.status,
               progress: Number(snapshot.progress?.percent ?? task.progress),
               message: String(snapshot.progress?.message ?? "Processing download..."),
             }));
@@ -443,6 +484,7 @@ export default function Home() {
           title: videoInfo.title,
           speed: exportSpeed,
           sessionId,
+          kind: "download",
         }),
       });
       const startData = await startRes.json();
@@ -621,7 +663,7 @@ export default function Home() {
               YouTube Trimmer
             </h1>
             <p className="text-gray-400 mt-1 text-sm sm:text-base">
-              Trim, preview, and download any YouTube video — fast. — fast.
+              Trim, preview, and download any YouTube video — fast.
             </p>
           </div>
           <ColorPicker selected={theme} onChange={setTheme} />
@@ -635,6 +677,12 @@ export default function Home() {
           >
             {tmpCleanupStatus}
           </p>
+          {processingStatus && (
+            <p className="mt-1 text-xs text-gray-300">
+              Processing slots: {processingStatus.processingJobs}/{processingStatus.maxConcurrentJobs}{" "}
+              active · {processingStatus.queuedJobs} queued · {processingStatus.availableSlots} available
+            </p>
+          )}
         </section>
 
         <section className="glass-panel p-6">
@@ -731,7 +779,12 @@ export default function Home() {
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold text-white">Download Jobs</h3>
               <p className="text-xs text-gray-400">
-                {downloadTasks.filter((task) => task.status === "processing" || task.status === "starting").length}{" "}
+                {downloadTasks.filter(
+                  (task) =>
+                    task.status === "processing" ||
+                    task.status === "starting" ||
+                    task.status === "queued"
+                ).length}{" "}
                 active · {downloadTasks.length} total
               </p>
             </div>
@@ -759,7 +812,11 @@ export default function Home() {
                         title={task.status === "failed" ? "Failed" : "Processing"}
                         message={task.error ?? task.message}
                         percent={task.progress}
-                        active={task.status === "processing" || task.status === "starting"}
+                        active={
+                          task.status === "processing" ||
+                          task.status === "starting" ||
+                          task.status === "queued"
+                        }
                       />
                     </div>
                   )}
