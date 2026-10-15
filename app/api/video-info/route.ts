@@ -27,6 +27,39 @@ type VideoInfoAttempt = {
   args: string[];
 };
 
+const YTDLP_VIDEO_INFO_TEMPLATE =
+  '{"id":%(id)j,"title":%(title)j,"duration":%(duration)j,"thumbnail":%(thumbnail)j,"uploader":%(uploader)j}';
+
+function parseYtDlpVideoInfo(stdout: string): YtDlpOutput {
+  const jsonLine = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("{") && line.endsWith("}"));
+
+  if (!jsonLine) {
+    throw new Error("yt-dlp returned no metadata");
+  }
+
+  const data = JSON.parse(jsonLine) as Partial<YtDlpOutput>;
+  if (
+    typeof data.id !== "string" ||
+    typeof data.title !== "string" ||
+    typeof data.duration !== "number" ||
+    !Number.isFinite(data.duration) ||
+    typeof data.thumbnail !== "string"
+  ) {
+    throw new Error("yt-dlp returned invalid metadata");
+  }
+
+  return {
+    id: data.id,
+    title: data.title,
+    duration: data.duration,
+    thumbnail: data.thumbnail,
+    uploader: data.uploader,
+  };
+}
+
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
 
@@ -84,7 +117,9 @@ export async function GET(request: NextRequest) {
           [
             ...authArgs,
             ...attempt.args,
-            "--dump-json",
+            "--skip-download",
+            "--print",
+            YTDLP_VIDEO_INFO_TEMPLATE,
             "--no-playlist",
             "--no-warnings",
             canonicalUrl,
@@ -106,7 +141,7 @@ export async function GET(request: NextRequest) {
       throw lastError ?? new Error("Failed to fetch video info");
     }
 
-    const data = JSON.parse(stdout) as YtDlpOutput;
+    const data = parseYtDlpVideoInfo(stdout);
 
     return NextResponse.json({
       videoId: data.id,
