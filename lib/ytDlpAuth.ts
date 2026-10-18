@@ -79,18 +79,28 @@ export function formatYtDlpAuthHint(errorMessage: string): string {
   );
 }
 
+function summarizeYtDlpError(message: string): string {
+  const line = message
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => entry && !entry.includes("googlevideo.com") && !entry.startsWith("http"));
+  return (line ?? "yt-dlp failed").slice(0, 180);
+}
+
 export function logYtDlpFailure(
   location: string,
   error: unknown,
   context: Record<string, unknown> = {}
 ) {
+  if (context.willRetry === true) return;
+
   const message = error instanceof Error ? error.message : String(error);
-  const willRetry = context.willRetry === true;
-  console.warn(willRetry ? "yt-dlp attempt failed, trying fallback" : "yt-dlp failed", {
+  const { willRetry: _willRetry, ...details } = context;
+  console.warn("yt-dlp failed", {
     location,
-    ...context,
+    ...details,
     authMode: getYtDlpAuthMode(),
     ageRestricted: isAgeRestrictedYtDlpError(message),
-    errorPreview: message.slice(0, 500),
+    error: summarizeYtDlpError(message),
   });
 }
