@@ -85,7 +85,8 @@ export function logYtDlpFailure(
   context: Record<string, unknown> = {}
 ) {
   const message = error instanceof Error ? error.message : String(error);
-  console.warn("yt-dlp failed", {
+  const willRetry = context.willRetry === true;
+  console.warn(willRetry ? "yt-dlp attempt failed, trying fallback" : "yt-dlp failed", {
     location,
     ...context,
     authMode: getYtDlpAuthMode(),

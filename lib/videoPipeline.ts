@@ -281,21 +281,27 @@ async function downloadWithFallbacks(
   ];
   const sectionAttempts: YtDlpAttempt[] = [
     {
-      label: "1080p single-file (section)",
-      args: ["-f", "best[height<=1080][ext=mp4]/best[height<=1080]"],
+      label: "1080p merged (section)",
+      args: ["-f", FORMAT_1080_ANY, "--merge-output-format", "mp4"],
     },
     {
-      label: "android/web single-file (section)",
+      label: "1080p mp4 merged (section)",
+      args: ["-f", FORMAT_1080_MP4, "--merge-output-format", "mp4"],
+    },
+    {
+      label: "android/web merged (section)",
       args: [
         "-f",
-        "best[height<=1080][ext=mp4]/best[height<=1080]",
+        FORMAT_1080_ANY,
+        "--merge-output-format",
+        "mp4",
         "--extractor-args",
         "youtube:player_client=android,web",
       ],
     },
     {
       label: "720p fallback (section)",
-      args: ["-f", "best[height<=720][ext=mp4]/best[height<=720]/best"],
+      args: ["-f", "best[height<=720]/best"],
     },
   ];
   const attempts = range ? sectionAttempts : defaultAttempts;
@@ -304,7 +310,14 @@ async function downloadWithFallbacks(
 
   const authArgs = getYtDlpAuthArgs();
   const sectionArgs = range
-    ? ["--download-sections", createDownloadSectionArg(range)]
+    ? [
+        "--download-sections",
+        createDownloadSectionArg(range),
+        // Progressive formats make ffmpeg open the googlevideo URL itself, which
+        // YouTube rejects with 403. These headers cover that path if it is used.
+        "--downloader-args",
+        'ffmpeg_i:-user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" -referer https://www.youtube.com/',
+      ]
     : [];
   const retryCount = range ? "2" : "10";
   const fragmentRetryCount = range ? "2" : "10";
@@ -351,9 +364,11 @@ async function downloadWithFallbacks(
       throw new Error(`yt-dlp attempt "${attempt.label}" completed without output`);
     } catch (error) {
       lastError = error;
+      const willRetry = attempt !== attempts[attempts.length - 1];
       logYtDlpFailure("videoPipeline.ts:downloadWithFallbacks", error, {
         attempt: attempt.label,
         url: canonicalUrl,
+        willRetry,
       });
       cleanupFiles(outputPath);
     }
