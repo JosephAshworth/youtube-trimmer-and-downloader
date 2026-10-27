@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { existsSync, mkdirSync, unlinkSync, renameSync, readdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { basename, dirname, join } from "path";
 import ffmpeg from "fluent-ffmpeg";
 import {
   type ExportSpeed,
@@ -20,14 +20,19 @@ import {
 
 export const TMP_DIR = join(process.cwd(), "tmp");
 const YT_DLP_TIMEOUT_MS = 300000;
-const YT_DLP_CONCURRENT_FRAGMENTS = 8;
-const DOWNLOAD_SEGMENT_MS = 3 * 60 * 1000;
+const YT_DLP_CONCURRENT_FRAGMENTS = 16;
+const SECTION_DOWNLOAD_CONCURRENCY = 2;
+// One section covers a short clip. Longer clips are split into larger pieces so
+// each yt-dlp process still finishes inside the timeout, without a cut every 3 minutes.
+const DOWNLOAD_SEGMENT_MS = 10 * 60 * 1000;
 const SECTION_DOWNLOAD_BACKOFF_MS = 15 * 60 * 1000;
 
-const FORMAT_1080_MP4 =
-  "bestvideo[height=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]";
-const FORMAT_1080_ANY =
-  "bestvideo[height=1080]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]";
+// YouTube's "best" mp4 is often AV1. Copied into an MP4 it plays audio and a blank picture
+// in QuickTime and many other players, so keep H.264 video and AAC audio.
+const FORMAT_1080_H264 =
+  "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=1080][vcodec^=avc1][acodec^=mp4a]/best[height<=1080][vcodec^=avc1]";
+const FORMAT_720_H264 =
+  "bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[height<=720][vcodec^=avc1][acodec^=mp4a]/best[height<=720][vcodec^=avc1]";
 
 let sectionDownloadsBackoffUntil = 0;
 
@@ -40,6 +45,33 @@ export interface ProcessedVideoPaths {
 
 function maybeDelete(path: string) {
   if (existsSync(path)) unlinkSync(path);
+}
+
+function cleanupDownloadArtifacts(outputPath: string) {
+  cleanupFiles(outputPath, `${outputPath}.part`, `${outputPath}.ytdl`);
+  const dir = dirname(outputPath);
+  const stem = basename(outputPath).replace(/\.[^.]+$/, "");
+  const prefix = `${stem}.`;
+  if (!existsSync(dir)) return;
+  for (const file of readdirSync(dir)) {
+    if (file.startsWith(prefix)) cleanupFiles(join(dir, file));
+  }
+}
+
+function linkAbortSignal(parent?: AbortSignal): {
+  signal: AbortSignal;
+  abort: () => void;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (parent?.aborted) controller.abort();
+  else parent?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    abort: () => controller.abort(),
+    cleanup: () => parent?.removeEventListener("abort", onAbort),
+  };
 }
 
 export interface ProcessVideoInput {
@@ -161,7 +193,7 @@ function createDownloadSectionArg(range: TimeRange): string {
 
 function isLikelyHttp403(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return error.message.includes("403 Forbidden");
+  return /403:?\s*Forbidden/i.test(error.message);
 }
 
 function shouldBackOffSectionDownloads(now = Date.now()): boolean {
@@ -252,47 +284,40 @@ async function downloadWithFallbacks(
   outputPath: string,
   onProgress?: ProgressCallback,
   signal?: AbortSignal,
-  range?: TimeRange
+  range?: TimeRange,
+  mode: "default" | "android-web-1080" = "default"
 ): Promise<void> {
   const defaultAttempts: YtDlpAttempt[] = [
     {
-      label: "1080p merged (default client)",
-      args: ["-f", FORMAT_1080_ANY, "--merge-output-format", "mp4"],
+      label: "1080p h264 (default client)",
+      args: ["-f", FORMAT_1080_H264, "--merge-output-format", "mp4"],
     },
     {
-      label: "1080p mp4 merged (default client)",
-      args: ["-f", FORMAT_1080_MP4, "--merge-output-format", "mp4"],
-    },
-    {
-      label: "1080p single-file (default client)",
-      args: ["-f", "best[height<=1080][ext=mp4]/best[height<=1080]"],
-    },
-    {
-      label: "android/web fallback (may be below 1080)",
+      label: "1080p h264 (android/web)",
       args: [
         "-f",
-        "best[height<=1080]/best",
+        FORMAT_1080_H264,
         "--merge-output-format",
         "mp4",
         "--extractor-args",
         "youtube:player_client=android,web",
       ],
+    },
+    {
+      label: "720p h264 fallback",
+      args: ["-f", FORMAT_720_H264, "--merge-output-format", "mp4"],
     },
   ];
   const sectionAttempts: YtDlpAttempt[] = [
     {
-      label: "1080p merged (section)",
-      args: ["-f", FORMAT_1080_ANY, "--merge-output-format", "mp4"],
+      label: "1080p h264 (section)",
+      args: ["-f", FORMAT_1080_H264, "--merge-output-format", "mp4"],
     },
     {
-      label: "1080p mp4 merged (section)",
-      args: ["-f", FORMAT_1080_MP4, "--merge-output-format", "mp4"],
-    },
-    {
-      label: "android/web merged (section)",
+      label: "android/web h264 (section)",
       args: [
         "-f",
-        FORMAT_1080_ANY,
+        FORMAT_1080_H264,
         "--merge-output-format",
         "mp4",
         "--extractor-args",
@@ -300,11 +325,27 @@ async function downloadWithFallbacks(
       ],
     },
     {
-      label: "720p fallback (section)",
-      args: ["-f", "best[height<=720]/best"],
+      label: "720p h264 fallback (section)",
+      args: ["-f", FORMAT_720_H264, "--merge-output-format", "mp4"],
     },
   ];
-  const attempts = range ? sectionAttempts : defaultAttempts;
+  const androidWebSectionRetry: YtDlpAttempt = {
+    label: "android/web h264 (section retry)",
+    args: [
+      "-f",
+      FORMAT_1080_H264,
+      "--merge-output-format",
+      "mp4",
+      "--extractor-args",
+      "youtube:player_client=android,web",
+    ],
+  };
+  const attempts =
+    range && mode === "android-web-1080"
+      ? [androidWebSectionRetry]
+      : range
+        ? sectionAttempts
+        : defaultAttempts;
 
   let lastError: unknown;
 
@@ -349,7 +390,11 @@ async function downloadWithFallbacks(
           "30",
           "--concurrent-fragments",
           String(YT_DLP_CONCURRENT_FRAGMENTS),
-          "--no-part",
+          "--throttled-rate",
+          "100K",
+          // Section downloads keep .part files so a failed fragment can resume.
+          // Full downloads still write straight to the destination.
+          ...(range ? [] : ["--no-part"]),
           canonicalUrl,
         ],
         attempt.label,
@@ -363,6 +408,8 @@ async function downloadWithFallbacks(
       }
       throw new Error(`yt-dlp attempt "${attempt.label}" completed without output`);
     } catch (error) {
+      cleanupDownloadArtifacts(outputPath);
+      if (signal?.aborted || isProcessingAborted(error)) throw error;
       lastError = error;
       const willRetry = attempt !== attempts[attempts.length - 1];
       logYtDlpFailure("videoPipeline.ts:downloadWithFallbacks", error, {
@@ -370,7 +417,6 @@ async function downloadWithFallbacks(
         url: canonicalUrl,
         willRetry,
       });
-      cleanupFiles(outputPath);
     }
   }
 
@@ -381,6 +427,112 @@ async function downloadWithFallbacks(
       `yt-dlp failed after multiple fallback attempts. Last error: ${lastMessage}`
     )
   );
+}
+
+async function downloadOneSection(
+  canonicalUrl: string,
+  outputPath: string,
+  range: TimeRange,
+  onProgress: ProgressCallback | undefined,
+  signal: AbortSignal | undefined
+): Promise<void> {
+  try {
+    await downloadWithFallbacks(canonicalUrl, outputPath, onProgress, signal, range);
+  } catch (error) {
+    if (signal?.aborted || !isLikelyHttp403(error)) throw error;
+    // Same 1080p H.264 format, one fresh client, before giving up on sections.
+    await downloadWithFallbacks(
+      canonicalUrl,
+      outputPath,
+      onProgress,
+      signal,
+      range,
+      "android-web-1080"
+    );
+  }
+}
+
+async function downloadSectionRanges(
+  canonicalUrl: string,
+  ranges: TimeRange[],
+  segmentPaths: string[],
+  onProgress: ProgressCallback | undefined,
+  signal?: AbortSignal
+): Promise<"ok" | "unavailable"> {
+  const linked = linkAbortSignal(signal);
+  let nextIndex = 0;
+  let unavailable = false;
+  let failure: unknown = null;
+
+  const fail = (error: unknown) => {
+    if (failure === null) failure = error;
+    linked.abort();
+  };
+
+  const worker = async () => {
+    while (!unavailable && failure === null && !linked.signal.aborted) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= ranges.length) return;
+
+      const segmentOnProgress: ProgressCallback = (progress) => {
+        if (ranges.length === 1) {
+          onProgress?.(progress);
+          return;
+        }
+        onProgress?.({
+          ...progress,
+          message: `Segment ${index + 1}/${ranges.length}: ${progress.message}`,
+        });
+      };
+
+      try {
+        emitProgress(
+          segmentOnProgress,
+          "download",
+          2,
+          `Downloading segment ${index + 1}/${ranges.length}...`
+        );
+        await downloadOneSection(
+          canonicalUrl,
+          segmentPaths[index],
+          ranges[index],
+          segmentOnProgress,
+          linked.signal
+        );
+        if (!existsSync(segmentPaths[index])) {
+          throw new Error(`Segment ${index + 1} download failed - file not created`);
+        }
+      } catch (error) {
+        if (isLikelyHttp403(error)) {
+          unavailable = true;
+          linked.abort();
+          return;
+        }
+        if (linked.signal.aborted && (unavailable || signal?.aborted)) {
+          if (signal?.aborted) fail(createAbortError());
+          return;
+        }
+        fail(error);
+        return;
+      }
+    }
+  };
+
+  try {
+    const workerCount = Math.min(SECTION_DOWNLOAD_CONCURRENCY, ranges.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  } finally {
+    linked.cleanup();
+  }
+
+  if (signal?.aborted) throw createAbortError();
+  if (failure) throw failure;
+  if (unavailable) {
+    recordSectionDownload403();
+    return "unavailable";
+  }
+  return "ok";
 }
 
 function trimVideo(
@@ -611,8 +763,64 @@ async function downloadFullThenTrimSegments(
   }
 }
 
-export async function processVideoToOutputFile(
-  canonicalUrl: string,
+function isProcessingAborted(error: unknown): boolean {
+  return error instanceof Error && error.message === "Processing aborted";
+}
+
+function trimUploadedClip(
+  inputPath: string,
+  outputPath: string,
+  startMs: number,
+  endMs: number,
+  progressCap: number,
+  onProgress?: ProgressCallback,
+  signal?: AbortSignal
+): Promise<void> {
+  return probeAudioInfo(inputPath).then(({ hasAudio }) => {
+    return new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(createAbortError());
+        return;
+      }
+      const start = msToFfmpegTimestamp(startMs);
+      const duration = msToFfmpegTimestamp(Math.max(1, endMs - startMs));
+      maybeDelete(outputPath);
+      emitProgress(onProgress, "trim", 8, "Trimming uploaded video...");
+      let command = ffmpeg(inputPath)
+        .setStartTime(start)
+        .setDuration(duration)
+        .videoCodec("libx264")
+        .outputOptions(["-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+      if (hasAudio) {
+        command = command.audioCodec("aac").outputOptions(["-b:a", "192k"]);
+      } else {
+        command = command.outputOptions("-an");
+      }
+      command
+        .on("progress", (progress) => {
+          if (typeof progress.percent !== "number") return;
+          const ratio = Math.min(1, Math.max(0, progress.percent / 100));
+          emitProgress(
+            onProgress,
+            "trim",
+            8 + ratio * (progressCap - 8),
+            "Trimming uploaded video..."
+          );
+        })
+        .on("end", () => resolve())
+        .on("error", (err) => reject(err))
+        .save(outputPath);
+      const onAbort = () => {
+        command.kill("SIGKILL");
+        reject(createAbortError());
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  });
+}
+
+async function processLocalUpload(
+  localSourcePath: string,
   startTime: number,
   endTime: number,
   paths: ProcessedVideoPaths,
@@ -620,6 +828,77 @@ export async function processVideoToOutputFile(
   onProgress?: ProgressCallback,
   signal?: AbortSignal
 ): Promise<void> {
+  if (!existsSync(localSourcePath)) {
+    throw new Error("Uploaded video is no longer available. Upload it again.");
+  }
+
+  emitProgress(onProgress, "trim", 2, "Preparing uploaded video...");
+  const segmentPath = join(TMP_DIR, `${paths.id}_segment_001.mp4`);
+  try {
+    if (speed === 1) {
+      await trimUploadedClip(
+        localSourcePath,
+        paths.outputPath,
+        startTime,
+        endTime,
+        98,
+        onProgress,
+        signal
+      );
+    } else {
+      await trimUploadedClip(
+        localSourcePath,
+        segmentPath,
+        startTime,
+        endTime,
+        88,
+        onProgress,
+        signal
+      );
+      if (!existsSync(segmentPath)) {
+        throw new Error("Trim failed - file not created");
+      }
+      maybeDelete(paths.outputPath);
+      await speedVideo(segmentPath, paths.outputPath, speed, onProgress, signal);
+    }
+  } catch (error) {
+    if (!isProcessingAborted(error)) {
+      cleanupFiles(segmentPath, paths.outputPath);
+    }
+    throw error;
+  } finally {
+    cleanupFiles(segmentPath, paths.downloadedPath, paths.trimmedPath);
+  }
+
+  if (!existsSync(paths.outputPath)) {
+    throw new Error("Output assembly failed - file not created");
+  }
+  emitProgress(onProgress, "finalize", 100, "Processing complete");
+}
+
+export async function processVideoToOutputFile(
+  canonicalUrl: string,
+  startTime: number,
+  endTime: number,
+  paths: ProcessedVideoPaths,
+  speed: ExportSpeed,
+  onProgress?: ProgressCallback,
+  signal?: AbortSignal,
+  localSourcePath?: string | null
+): Promise<void> {
+  if (localSourcePath) {
+    await processLocalUpload(
+      localSourcePath,
+      startTime,
+      endTime,
+      paths,
+      speed,
+      onProgress,
+      signal
+    );
+    return;
+  }
+
   emitProgress(onProgress, "download", 1, "Starting processing...");
 
   // When a worker is configured, offload the entire yt-dlp + ffmpeg pipeline
@@ -668,28 +947,16 @@ export async function processVideoToOutputFile(
       return;
     }
 
-    let sectionDownloadFailed = false;
-    for (let index = 0; index < ranges.length; index += 1) {
-      const range = ranges[index];
-      const segmentPath = segmentPaths[index];
-      emitProgress(onProgress, "download", 2, `Downloading segment ${index + 1}/${ranges.length}...`);
-      try {
-        await downloadWithFallbacks(canonicalUrl, segmentPath, onProgress, signal, range);
-      } catch (error) {
-        if (isLikelyHttp403(error)) {
-          recordSectionDownload403();
-          sectionDownloadFailed = true;
-          break;
-        }
-        throw error;
-      }
-      if (!existsSync(segmentPath)) {
-        throw new Error(`Segment ${index + 1} download failed - file not created`);
-      }
-    }
+    const sectionResult = await downloadSectionRanges(
+      canonicalUrl,
+      ranges,
+      segmentPaths,
+      onProgress,
+      signal
+    );
 
-    if (sectionDownloadFailed) {
-      cleanupFiles(...segmentPaths);
+    if (sectionResult === "unavailable") {
+      for (const segmentPath of segmentPaths) cleanupDownloadArtifacts(segmentPath);
       await downloadFullThenTrimSegments(
         canonicalUrl,
         paths,
@@ -709,12 +976,8 @@ export async function processVideoToOutputFile(
       signal
     );
   } finally {
-    cleanupFiles(
-      ...segmentPaths,
-      ...spedSegmentPaths,
-      paths.downloadedPath,
-      paths.trimmedPath
-    );
+    for (const segmentPath of segmentPaths) cleanupDownloadArtifacts(segmentPath);
+    cleanupFiles(...spedSegmentPaths, paths.downloadedPath, paths.trimmedPath);
   }
 
   if (!existsSync(paths.outputPath)) {

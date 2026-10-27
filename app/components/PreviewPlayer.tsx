@@ -14,6 +14,7 @@ import { waitForJobProgress } from "../lib/jobProgressClient";
 
 interface PreviewPlayerProps {
   sourceUrl: string;
+  uploadId?: string | null;
   startMs: number;
   endMs: number;
   exportSpeed: ExportSpeed;
@@ -29,6 +30,7 @@ interface PreviewPlayerProps {
 
 export default function PreviewPlayer({
   sourceUrl,
+  uploadId = null,
   startMs,
   endMs,
   exportSpeed,
@@ -92,7 +94,7 @@ export default function PreviewPlayer({
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              url: sourceUrl,
+              ...(uploadId ? { uploadId } : { url: sourceUrl }),
               startTime: startMs,
               endTime: endMs,
               speed: exportSpeed,
@@ -170,7 +172,7 @@ export default function PreviewPlayer({
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [sourceUrl, startMs, endMs, exportSpeed, sessionId]);
+  }, [sourceUrl, uploadId, startMs, endMs, exportSpeed, sessionId]);
 
   useEffect(() => {
     const video = videoRef.current;

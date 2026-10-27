@@ -3,14 +3,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import FallingLogos from "./components/FallingLogos";
 import ColorPicker from "./components/ColorPicker";
-import YouTubeInput from "./components/YouTubeInput";
+import YouTubeInput, { type VideoSourceMode } from "./components/YouTubeInput";
 import VideoPlayer from "./components/VideoPlayer";
+import LocalVideoPlayer from "./components/LocalVideoPlayer";
 import Timeline from "./components/Timeline";
 import TimeInputs from "./components/TimeInputs";
 import PreviewPlayer from "./components/PreviewPlayer";
 import ExportSpeedSelector from "./components/ExportSpeedSelector";
 import LiveProgressBar from "./components/LiveProgressBar";
 import { useYouTubePlayer } from "./hooks/useYouTubePlayer";
+import { useHtmlVideoPlayer } from "./hooks/useHtmlVideoPlayer";
 import { useTimeRange } from "./hooks/useTimeRange";
 import { waitForJobProgress } from "./lib/jobProgressClient";
 import {
@@ -22,12 +24,16 @@ import {
 } from "@/lib/utils";
 
 interface VideoInfo {
+  source: "youtube" | "upload";
   videoId: string;
+  uploadId?: string;
   title: string;
   durationMs: number;
   thumbnail: string;
   uploader: string;
 }
+
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 type DownloadTaskStatus = "starting" | "queued" | "processing" | "ready" | "failed";
 
@@ -109,7 +115,12 @@ function readPreviewSession(): PersistedPreviewSession | null {
     const raw = window.localStorage.getItem(PREVIEW_SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PersistedPreviewSession;
-    return parsed && parsed.jobId && parsed.videoInfo ? parsed : null;
+    if (!parsed?.jobId || !parsed.videoInfo) return null;
+    parsed.videoInfo = {
+      ...parsed.videoInfo,
+      source: parsed.videoInfo.source === "upload" ? "upload" : "youtube",
+    };
+    return parsed;
   } catch {
     return null;
   }
@@ -138,6 +149,8 @@ function clearPreviewSession() {
 
 export default function Home() {
   const [url, setUrl] = useState("");
+  const [sourceMode, setSourceMode] = useState<VideoSourceMode>("youtube");
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [theme, setTheme] = useState<ThemeColor>(THEME_COLORS[3]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -148,6 +161,7 @@ export default function Home() {
   const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
   const downloadObjectUrlsRef = useRef<string[]>([]);
   const pendingDownloadsRef = useRef<{ url: string; filename: string }[]>([]);
+  const uploadRequestRef = useRef<XMLHttpRequest | null>(null);
   const resumedRef = useRef(false);
   const previewRestoredRef = useRef(false);
   const [resumePreviewJobId, setResumePreviewJobId] = useState<string | null>(null);
@@ -159,6 +173,7 @@ export default function Home() {
   );
 
   const player = useYouTubePlayer();
+  const htmlPlayer = useHtmlVideoPlayer();
   const timeRange = useTimeRange(videoInfo?.durationMs ?? 0);
 
   useEffect(() => {
@@ -168,6 +183,7 @@ export default function Home() {
 
   useEffect(() => {
     return () => {
+      uploadRequestRef.current?.abort();
       for (const objectUrl of downloadObjectUrlsRef.current) {
         URL.revokeObjectURL(objectUrl);
       }
@@ -387,6 +403,11 @@ export default function Home() {
     setDurationMs,
     state: playerState,
   } = player;
+  const {
+    destroy: destroyHtmlPlayer,
+    seekTo: seekHtmlPlayer,
+    state: htmlPlayerState,
+  } = htmlPlayer;
 
   const {
     startMs,
@@ -398,10 +419,34 @@ export default function Home() {
   } = timeRange;
 
   useEffect(() => {
-    if (videoInfo && playerState.durationMs > 0) {
+    if (!videoInfo || videoInfo.source === "upload") return;
+    if (playerState.durationMs > 0) {
       initRange(playerState.durationMs);
     }
   }, [videoInfo, playerState.durationMs, initRange]);
+
+  const clearLoadedVideo = useCallback(() => {
+    setVideoInfo(null);
+    setIsPreviewMode(false);
+    setResumePreviewJobId(null);
+    clearPreviewSession();
+    destroyPlayer();
+    destroyHtmlPlayer();
+  }, [destroyPlayer, destroyHtmlPlayer]);
+
+  const handleSourceModeChange = useCallback(
+    (mode: VideoSourceMode) => {
+      setSourceMode(mode);
+      const activeUpload = uploadRequestRef.current;
+      uploadRequestRef.current = null;
+      activeUpload?.abort();
+      setIsLoading(false);
+      setUploadProgress(null);
+      setError(null);
+      clearLoadedVideo();
+    },
+    [clearLoadedVideo]
+  );
 
   const handleProcess = useCallback(async () => {
     if (!url.trim()) return;
@@ -412,6 +457,7 @@ export default function Home() {
     setResumePreviewJobId(null);
     clearPreviewSession();
     destroyPlayer();
+    destroyHtmlPlayer();
 
     try {
       const res = await fetch(
@@ -424,6 +470,7 @@ export default function Home() {
       }
 
       setVideoInfo({
+        source: "youtube",
         videoId: data.videoId,
         title: data.title,
         durationMs: data.durationMs,
@@ -437,10 +484,87 @@ export default function Home() {
     } finally {
       setIsLoading(false);
     }
-  }, [url, destroyPlayer, initRange]);
+  }, [url, destroyPlayer, destroyHtmlPlayer, initRange]);
+
+  const handleUpload = useCallback(
+    (file: File) => {
+      if (file.size > MAX_UPLOAD_BYTES) {
+        setError("File is larger than 2 GB.");
+        return;
+      }
+
+      const previous = uploadRequestRef.current;
+      uploadRequestRef.current = null;
+      previous?.abort();
+      setIsLoading(true);
+      setUploadProgress(0);
+      setError(null);
+      setIsPreviewMode(false);
+      setResumePreviewJobId(null);
+      clearPreviewSession();
+      destroyPlayer();
+      destroyHtmlPlayer();
+
+      const xhr = new XMLHttpRequest();
+      uploadRequestRef.current = xhr;
+      xhr.open("POST", "/api/upload");
+      xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      xhr.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable || event.total <= 0) return;
+        setUploadProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      xhr.onerror = () => {
+        if (uploadRequestRef.current !== xhr) return;
+        setIsLoading(false);
+        setUploadProgress(null);
+        setError("Upload failed");
+      };
+      xhr.onabort = () => {
+        if (uploadRequestRef.current !== xhr) return;
+        setIsLoading(false);
+        setUploadProgress(null);
+      };
+      xhr.onload = () => {
+        if (uploadRequestRef.current !== xhr) return;
+        setIsLoading(false);
+        setUploadProgress(null);
+        let data: {
+          error?: string;
+          uploadId?: string;
+          title?: string;
+          durationMs?: number;
+        } = {};
+        try {
+          data = JSON.parse(xhr.responseText) as typeof data;
+        } catch {
+          setError("Upload failed");
+          return;
+        }
+        if (xhr.status < 200 || xhr.status >= 300 || !data.uploadId || !data.durationMs) {
+          setError(data.error ?? "Upload failed");
+          setVideoInfo(null);
+          return;
+        }
+        setVideoInfo({
+          source: "upload",
+          videoId: data.uploadId,
+          uploadId: data.uploadId,
+          title: data.title || file.name,
+          durationMs: data.durationMs,
+          thumbnail: "",
+          uploader: "Uploaded file",
+        });
+        initRange(data.durationMs);
+      };
+      xhr.send(file);
+    },
+    [destroyPlayer, destroyHtmlPlayer, initRange]
+  );
 
   const handleDownload = useCallback(async () => {
-    if (!videoInfo || !url.trim()) return;
+    if (!videoInfo) return;
+    if (videoInfo.source !== "upload" && !url.trim()) return;
 
     const taskId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const safeTitle =
@@ -478,7 +602,9 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          url: url.trim(),
+          ...(videoInfo.source === "upload"
+            ? { uploadId: videoInfo.uploadId }
+            : { url: url.trim() }),
           startTime: startMs,
           endTime: endMs,
           title: videoInfo.title,
@@ -584,6 +710,7 @@ export default function Home() {
     // One-time hydration of a persisted preview session on mount.
     /* eslint-disable react-hooks/set-state-in-effect */
     setUrl(session.url);
+    setSourceMode(session.videoInfo.source === "upload" ? "upload" : "youtube");
     setVideoInfo(session.videoInfo);
     setExportSpeed(session.speed);
     setRange(session.startMs, session.endMs);
@@ -602,8 +729,12 @@ export default function Home() {
     clearPreviewSession();
     setResumePreviewJobId(null);
     setIsPreviewMode(false);
-    seekTo(startMs);
-  }, [seekTo, startMs]);
+    if (videoInfo?.source === "upload") {
+      seekHtmlPlayer(startMs);
+    } else {
+      seekTo(startMs);
+    }
+  }, [seekTo, seekHtmlPlayer, startMs, videoInfo?.source]);
 
   // PreviewPlayer reports the jobId it started so we can persist the whole
   // editing session and resume the preview after a background reload.
@@ -613,7 +744,7 @@ export default function Home() {
       setResumePreviewJobId(null);
       writePreviewSession({
         jobId,
-        url: url.trim(),
+        url: videoInfo.source === "upload" ? "" : url.trim(),
         videoInfo,
         startMs,
         endMs,
@@ -663,7 +794,7 @@ export default function Home() {
               YouTube Trimmer
             </h1>
             <p className="text-gray-400 mt-1 text-sm sm:text-base">
-              Trim, preview, and download any YouTube video — fast.
+              Trim, preview, and download a YouTube video or a file from your computer.
             </p>
           </div>
           <ColorPicker selected={theme} onChange={setTheme} />
@@ -687,10 +818,14 @@ export default function Home() {
 
         <section className="glass-panel p-6">
           <YouTubeInput
+            mode={sourceMode}
+            onModeChange={handleSourceModeChange}
             url={url}
             onUrlChange={setUrl}
             onProcess={handleProcess}
+            onUpload={handleUpload}
             isLoading={isLoading}
+            uploadProgress={uploadProgress}
           />
           {error && (
             <p className="mt-3 text-red-400 text-sm" role="alert">
@@ -705,40 +840,69 @@ export default function Home() {
               <h2 className="text-lg font-semibold text-white truncate">
                 {videoInfo.title}
               </h2>
-              <p className="text-sm text-gray-400">by {videoInfo.uploader}</p>
+              {videoInfo.source === "youtube" && (
+                <p className="text-sm text-gray-400">by {videoInfo.uploader}</p>
+              )}
             </section>
 
             {!isPreviewMode ? (
               <>
-                <VideoPlayer
-                  videoId={videoInfo.videoId}
-                  durationMs={playerState.durationMs || videoInfo.durationMs}
-                  currentTimeMs={playerState.currentTime}
-                  isPlaying={playerState.isPlaying}
-                  volume={playerState.volume}
-                  onReady={(e) => onReady(e.target)}
-                  onStateChange={(e) => onStateChange(e)}
-                  onTogglePlay={togglePlay}
-                  onSkip={skip}
-                  onSeek={seekTo}
-                  onVolumeChange={setVolume}
-                  onEndedAt={setDurationMs}
-                  useNativeControls={false}
-                  showCustomTimeline
-                />
+                {videoInfo.source === "upload" && videoInfo.uploadId ? (
+                  <LocalVideoPlayer
+                    src={`/api/upload/${videoInfo.uploadId}`}
+                    durationMs={htmlPlayerState.durationMs || videoInfo.durationMs}
+                    currentTimeMs={htmlPlayerState.currentTime}
+                    isPlaying={htmlPlayerState.isPlaying}
+                    volume={htmlPlayerState.volume}
+                    onTogglePlay={htmlPlayer.togglePlay}
+                    onSkip={htmlPlayer.skip}
+                    onSeek={seekHtmlPlayer}
+                    onVolumeChange={htmlPlayer.setVolume}
+                    videoRef={htmlPlayer.setVideoNode}
+                  />
+                ) : (
+                  <VideoPlayer
+                    videoId={videoInfo.videoId}
+                    durationMs={playerState.durationMs || videoInfo.durationMs}
+                    currentTimeMs={playerState.currentTime}
+                    isPlaying={playerState.isPlaying}
+                    volume={playerState.volume}
+                    onReady={(e) => onReady(e.target)}
+                    onStateChange={(e) => onStateChange(e)}
+                    onTogglePlay={togglePlay}
+                    onSkip={skip}
+                    onSeek={seekTo}
+                    onVolumeChange={setVolume}
+                    onEndedAt={setDurationMs}
+                    useNativeControls={false}
+                    showCustomTimeline
+                  />
+                )}
 
                 <Timeline
-                  durationMs={playerState.durationMs || videoInfo.durationMs}
-                  currentTimeMs={playerState.currentTime}
+                  durationMs={
+                    videoInfo.source === "upload"
+                      ? htmlPlayerState.durationMs || videoInfo.durationMs
+                      : playerState.durationMs || videoInfo.durationMs
+                  }
+                  currentTimeMs={
+                    videoInfo.source === "upload"
+                      ? htmlPlayerState.currentTime
+                      : playerState.currentTime
+                  }
                   startMs={startMs}
                   endMs={endMs}
-                  onSeek={seekTo}
+                  onSeek={videoInfo.source === "upload" ? seekHtmlPlayer : seekTo}
                   onStartChange={setStart}
                   onEndChange={setEnd}
                 />
 
                 <TimeInputs
-                  durationMs={playerState.durationMs || videoInfo.durationMs}
+                  durationMs={
+                    videoInfo.source === "upload"
+                      ? htmlPlayerState.durationMs || videoInfo.durationMs
+                      : playerState.durationMs || videoInfo.durationMs
+                  }
                   startMs={startMs}
                   endMs={endMs}
                   onStartUpdate={setStart}
@@ -757,7 +921,8 @@ export default function Home() {
               </>
             ) : (
               <PreviewPlayer
-                sourceUrl={url.trim()}
+                sourceUrl={videoInfo.source === "upload" ? "" : url.trim()}
+                uploadId={videoInfo.uploadId ?? null}
                 startMs={startMs}
                 endMs={endMs}
                 exportSpeed={exportSpeed}
@@ -841,7 +1006,7 @@ export default function Home() {
 
         {!videoInfo && !isLoading && (
           <section className="glass-panel p-8 text-center text-gray-400">
-            <p>Paste a YouTube link above to get started.</p>
+            <p>Paste a YouTube link or upload a video file to get started.</p>
             <p className="text-sm mt-2">Works with public and unlisted videos.</p>
           </section>
         )}

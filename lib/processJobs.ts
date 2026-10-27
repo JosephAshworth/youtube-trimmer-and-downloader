@@ -32,6 +32,7 @@ interface Job {
   kind: JobKind;
   runnerStarted: boolean;
   completedAt: number | null;
+  localSourcePath: string | null;
 }
 
 const jobs = new Map<string, Job>();
@@ -212,7 +213,8 @@ function startJobRunner(jobId: string) {
           if (!existing) return;
           existing.progress = progress;
         },
-        job.abortController.signal
+        job.abortController.signal,
+        job.localSourcePath
       );
       const existing = jobs.get(jobId);
       if (!existing) return;
@@ -285,6 +287,7 @@ export function createProcessingJob(input: {
   title?: string;
   sessionId?: string;
   kind?: JobKind;
+  localSourcePath?: string | null;
 }): string {
   initializeLifecycleCleanup();
   const duplicate = findActiveDuplicateJob(input);
@@ -332,6 +335,7 @@ export function createProcessingJob(input: {
     kind: input.kind ?? "download",
     runnerStarted: false,
     completedAt: null,
+    localSourcePath: input.localSourcePath ?? null,
   };
   jobs.set(id, job);
   debugLog("H1,H2", "processJobs.ts:createProcessingJob", "job created", {
