@@ -17,10 +17,12 @@ import {
   downloadProcessedClipFromWorker,
   isWorkerEnabled,
 } from "@/lib/ytDlpWorker";
+import { tryFastLocalExport, tryFastRangeExport } from "@/lib/rangedClip";
 
 export const TMP_DIR = join(process.cwd(), "tmp");
 const YT_DLP_TIMEOUT_MS = 300000;
-const YT_DLP_CONCURRENT_FRAGMENTS = 16;
+const YT_DLP_CONCURRENT_FRAGMENTS = 24;
+const YT_DLP_HTTP_CHUNK_SIZE = "8M";
 const SECTION_DOWNLOAD_CONCURRENCY = 2;
 // One section covers a short clip. Longer clips are split into larger pieces so
 // each yt-dlp process still finishes inside the timeout, without a cut every 3 minutes.
@@ -388,6 +390,8 @@ async function downloadWithFallbacks(
           fragmentRetryCount,
           "--socket-timeout",
           "30",
+          "--http-chunk-size",
+          YT_DLP_HTTP_CHUNK_SIZE,
           "--concurrent-fragments",
           String(YT_DLP_CONCURRENT_FRAGMENTS),
           "--throttled-rate",
@@ -642,16 +646,29 @@ function speedVideo(
   return probeAudioInfo(inputPath).then(({ hasAudio, sampleRate }) => {
       return new Promise<void>((resolve, reject) => {
         emitProgress(onProgress, "speed", 91, "Applying speed effect...");
-        let cmd = ffmpeg(inputPath).videoFilters(`setpts=PTS/${speed}`);
+        let cmd = ffmpeg(inputPath)
+          .videoCodec("libx264")
+          .videoFilters(`setpts=(PTS-STARTPTS)/${speed}`);
         if (hasAudio) {
           cmd = cmd.audioFilters(
-            `asetrate=${Math.round(sampleRate * speed)},aresample=${sampleRate}`
+            `asetrate=${Math.round(sampleRate * speed)},aresample=${sampleRate},asetpts=PTS-STARTPTS`
           );
         } else {
           cmd = cmd.outputOptions("-an");
         }
         cmd
-          .outputOptions(["-movflags", "+faststart", "-preset", "veryfast", "-threads", "0"])
+          .outputOptions([
+            "-movflags",
+            "+faststart",
+            "-preset",
+            "superfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "0",
+          ])
           .on("progress", (progress) => {
             if (typeof progress.percent !== "number") return;
             const ratio = Math.min(1, Math.max(0, progress.percent / 100));
@@ -790,7 +807,18 @@ function trimUploadedClip(
         .setStartTime(start)
         .setDuration(duration)
         .videoCodec("libx264")
-        .outputOptions(["-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+        .outputOptions([
+          "-preset",
+          "veryfast",
+          "-crf",
+          "20",
+          "-pix_fmt",
+          "yuv420p",
+          "-threads",
+          "0",
+          "-movflags",
+          "+faststart",
+        ]);
       if (hasAudio) {
         command = command.audioCodec("aac").outputOptions(["-b:a", "192k"]);
       } else {
@@ -835,6 +863,23 @@ async function processLocalUpload(
   emitProgress(onProgress, "trim", 2, "Preparing uploaded video...");
   const segmentPath = join(TMP_DIR, `${paths.id}_segment_001.mp4`);
   try {
+    const fastLocal = await tryFastLocalExport({
+      sourcePath: localSourcePath,
+      outputPath: paths.outputPath,
+      startMs: startTime,
+      endMs: endTime,
+      speed,
+      signal,
+      onProgress: (stage, percent, message) => emitProgress(onProgress, stage, percent, message),
+    });
+    if (fastLocal) {
+      if (!existsSync(paths.outputPath)) {
+        throw new Error("Output assembly failed - file not created");
+      }
+      emitProgress(onProgress, "finalize", 100, "Processing complete");
+      return;
+    }
+
     if (speed === 1) {
       await trimUploadedClip(
         localSourcePath,
@@ -913,6 +958,38 @@ export async function processVideoToOutputFile(
     );
     if (!existsSync(paths.outputPath)) {
       throw new Error("Worker did not return an output file");
+    }
+    emitProgress(onProgress, "finalize", 100, "Processing complete");
+    return;
+  }
+
+  const fast = await tryFastRangeExport({
+    canonicalUrl,
+    startMs: startTime,
+    endMs: endTime,
+    speed,
+    outputPath: paths.outputPath,
+    tmpDir: TMP_DIR,
+    id: paths.id,
+    formatAttempts: [
+      { label: "1080p h264", args: ["-f", FORMAT_1080_H264] },
+      {
+        label: "1080p h264 (android/web)",
+        args: [
+          "-f",
+          FORMAT_1080_H264,
+          "--extractor-args",
+          "youtube:player_client=android,web",
+        ],
+      },
+      { label: "720p h264", args: ["-f", FORMAT_720_H264] },
+    ],
+    signal,
+    onProgress: (stage, percent, message) => emitProgress(onProgress, stage, percent, message),
+  });
+  if (fast) {
+    if (!existsSync(paths.outputPath)) {
+      throw new Error("Output assembly failed - file not created");
     }
     emitProgress(onProgress, "finalize", 100, "Processing complete");
     return;

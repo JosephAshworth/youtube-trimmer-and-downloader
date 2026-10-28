@@ -8,19 +8,17 @@ interface TimelineProps {
   currentTimeMs: number;
   startMs: number;
   endMs: number;
-  onSeek: (ms: number) => void;
   onStartChange: (ms: number) => void;
   onEndChange: (ms: number) => void;
 }
 
-type DragTarget = "start" | "end" | "scrub" | null;
+type DragTarget = "start" | "end" | null;
 
 export default function Timeline({
   durationMs,
   currentTimeMs,
   startMs,
   endMs,
-  onSeek,
   onStartChange,
   onEndChange,
 }: TimelineProps) {
@@ -42,6 +40,35 @@ export default function Timeline({
   );
 
   const pct = (ms: number) => (durationMs > 0 ? (ms / durationMs) * 100 : 0);
+  const playheadReady = durationMs > 0 && Number.isFinite(currentTimeMs);
+
+  const flashGapWarning = () => {
+    setShowWarning(true);
+    if (warningTimeoutRef.current) {
+      clearTimeout(warningTimeoutRef.current);
+    }
+    warningTimeoutRef.current = setTimeout(() => {
+      setShowWarning(false);
+    }, 1500);
+  };
+
+  const snapStartToPlayhead = () => {
+    if (!playheadReady) return;
+    const playheadMs = Math.min(Math.max(Math.round(currentTimeMs), 0), durationMs);
+    const maxStart = Math.max(endMs - minGap, 0);
+    const clamped = Math.min(playheadMs, maxStart);
+    if (clamped !== playheadMs) flashGapWarning();
+    onStartChange(clamped);
+  };
+
+  const snapEndToPlayhead = () => {
+    if (!playheadReady) return;
+    const playheadMs = Math.min(Math.max(Math.round(currentTimeMs), 0), durationMs);
+    const minEnd = Math.min(startMs + minGap, durationMs);
+    const clamped = Math.max(playheadMs, minEnd);
+    if (clamped !== playheadMs) flashGapWarning();
+    onEndChange(clamped);
+  };
 
   const handlePointerDown = (target: DragTarget) => (e: React.PointerEvent) => {
     e.preventDefault();
@@ -65,77 +92,65 @@ export default function Timeline({
 
     if (dragTarget === "start") {
       const clamped = Math.min(ms, endMs - minGap);
-      if (clamped !== ms) {
-        setShowWarning(true);
-        if (warningTimeoutRef.current) {
-          clearTimeout(warningTimeoutRef.current);
-        }
-        warningTimeoutRef.current = setTimeout(() => {
-          setShowWarning(false);
-        }, 1500);
-      }
+      if (clamped !== ms) flashGapWarning();
       onStartChange(clamped);
     } else if (dragTarget === "end") {
       const clamped = Math.max(ms, startMs + minGap);
-      if (clamped !== ms) {
-        setShowWarning(true);
-        if (warningTimeoutRef.current) {
-          clearTimeout(warningTimeoutRef.current);
-        }
-        warningTimeoutRef.current = setTimeout(() => {
-          setShowWarning(false);
-        }, 1500);
-      }
+      if (clamped !== ms) flashGapWarning();
       onEndChange(clamped);
-    } else if (dragTarget === "scrub") {
-      onSeek(ms);
     }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
     setDragTarget(null);
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-  };
-
-  const handleTrackClick = (e: React.MouseEvent) => {
-    if (e.target === trackRef.current || (e.target as HTMLElement).dataset.track) {
-      onSeek(toMs(e.clientX));
+    if ((e.currentTarget as HTMLElement).hasPointerCapture?.(e.pointerId)) {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     }
   };
 
   return (
     <div className="glass-panel p-5 flex flex-col gap-4">
-      <div className="flex justify-between text-xs text-gray-400 font-mono">
-        <span>Start: {formatTimeDisplay(startMs)}</span>
-        <span>End: {formatTimeDisplay(endMs)}</span>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span className="text-xs text-gray-400 font-mono">
+          Start: {formatTimeDisplay(startMs)}
+        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={snapStartToPlayhead}
+            disabled={!playheadReady}
+            className="btn-secondary px-3 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label="Set start to playhead"
+          >
+            Set start to playhead
+          </button>
+          <button
+            type="button"
+            onClick={snapEndToPlayhead}
+            disabled={!playheadReady}
+            className="btn-secondary px-3 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label="Set end to playhead"
+          >
+            Set end to playhead
+          </button>
+        </div>
+        <span className="text-xs text-gray-400 font-mono">
+          End: {formatTimeDisplay(endMs)}
+        </span>
       </div>
 
       <div
         ref={trackRef}
-        className="relative h-12 cursor-pointer select-none"
-        onPointerDown={(e) => {
-          if (
-            e.target === trackRef.current ||
-            (e.target as HTMLElement).dataset.track
-          ) {
-            handlePointerDown("scrub")(e);
-          }
-        }}
+        className="relative h-12 select-none"
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onClick={handleTrackClick}
         role="group"
-        aria-label="Video timeline"
+        aria-label="Trim range"
       >
-        {/* Background track */}
-        <div
-          data-track
-          className="absolute top-1/2 -translate-y-1/2 w-full h-2 rounded-full bg-white/10"
-        />
+        <div className="absolute top-1/2 -translate-y-1/2 w-full h-2 rounded-full bg-white/10" />
 
-        {/* Selected range highlight */}
         <div
-          className="absolute top-1/2 -translate-y-1/2 h-2 rounded-full"
+          className="absolute top-1/2 -translate-y-1/2 h-2 rounded-full pointer-events-none"
           style={{
             left: `${pct(startMs)}%`,
             width: `${pct(endMs - startMs)}%`,
@@ -143,18 +158,6 @@ export default function Timeline({
             opacity: 0.55,
             boxShadow: "0 0 12px rgba(0, 255, 136, 0.45), 0 0 12px rgba(255, 0, 64, 0.45)",
           }}
-        />
-
-        {/* Current playback position */}
-        <div
-          className="absolute top-1/2 -translate-y-1/2 w-1 h-5 rounded-full bg-white"
-          style={{ left: `calc(${pct(currentTimeMs)}% - 2px)` }}
-        />
-
-        {/* Scrub area (invisible, full height) */}
-        <div
-          data-track
-          className="absolute inset-0 pointer-events-none"
         />
 
         {/* Start marker */}

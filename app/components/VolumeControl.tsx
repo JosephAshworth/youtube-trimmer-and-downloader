@@ -3,15 +3,25 @@
 interface VolumeControlProps {
   volume: number;
   onChange: (volume: number) => void;
+  variant?: "default" | "overlay";
 }
 
-export default function VolumeControl({ volume, onChange }: VolumeControlProps) {
+export default function VolumeControl({
+  volume,
+  onChange,
+  variant = "default",
+}: VolumeControlProps) {
+  const overlay = variant === "overlay";
   return (
-    <div className="flex items-center gap-2">
+    <div className={`flex items-center ${overlay ? "gap-1.5" : "gap-2"}`}>
       <button
         type="button"
         onClick={() => onChange(volume === 0 ? 100 : 0)}
-        className="text-gray-300 hover:text-white transition-colors p-1"
+        className={
+          overlay
+            ? "text-white/90 hover:text-white transition-colors p-1"
+            : "text-gray-300 hover:text-white transition-colors p-1"
+        }
         aria-label={volume === 0 ? "Unmute" : "Mute"}
       >
         {volume === 0 ? (
@@ -34,10 +44,12 @@ export default function VolumeControl({ volume, onChange }: VolumeControlProps) 
         max={100}
         value={volume}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-24"
+        className={overlay ? "player-volume" : "w-24"}
         aria-label="Volume"
       />
-      <span className="text-xs text-gray-400 w-8">{volume}%</span>
+      <span className={overlay ? "text-[11px] text-white/80 w-8 tabular-nums" : "text-xs text-gray-400 w-8"}>
+        {volume}%
+      </span>
     </div>
   );
 }

@@ -857,6 +857,8 @@ export default function Home() {
                     onTogglePlay={htmlPlayer.togglePlay}
                     onSkip={htmlPlayer.skip}
                     onSeek={seekHtmlPlayer}
+                    onScrubStart={htmlPlayer.beginScrub}
+                    onScrubEnd={htmlPlayer.endScrub}
                     onVolumeChange={htmlPlayer.setVolume}
                     videoRef={htmlPlayer.setVideoNode}
                   />
@@ -872,6 +874,8 @@ export default function Home() {
                     onTogglePlay={togglePlay}
                     onSkip={skip}
                     onSeek={seekTo}
+                    onScrubStart={player.beginScrub}
+                    onScrubEnd={player.endScrub}
                     onVolumeChange={setVolume}
                     onEndedAt={setDurationMs}
                     useNativeControls={false}
@@ -892,7 +896,6 @@ export default function Home() {
                   }
                   startMs={startMs}
                   endMs={endMs}
-                  onSeek={videoInfo.source === "upload" ? seekHtmlPlayer : seekTo}
                   onStartChange={setStart}
                   onEndChange={setEnd}
                 />

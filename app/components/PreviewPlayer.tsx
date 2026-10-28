@@ -4,13 +4,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import DownloadButton from "./DownloadButton";
 import ExportSpeedSelector from "./ExportSpeedSelector";
 import LiveProgressBar from "./LiveProgressBar";
-import VolumeControl from "./VolumeControl";
+import PlayerChrome from "./PlayerChrome";
 import {
   type ExportSpeed,
   formatTimeDisplay,
   getExportSpeedLabel,
 } from "@/lib/utils";
 import { waitForJobProgress } from "../lib/jobProgressClient";
+import {
+  createLiveScrubSession,
+  flushLiveScrub,
+  pushLiveScrub,
+} from "../lib/liveVideoScrub";
 
 interface PreviewPlayerProps {
   sourceUrl: string;
@@ -44,7 +49,10 @@ export default function PreviewPlayer({
   isQueueingDownload,
 }: PreviewPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const timelineRef = useRef<HTMLInputElement | null>(null);
+  const seekHoldRef = useRef<number | null>(null);
+  const scrubbingRef = useRef(false);
+  const scrubSessionRef = useRef(createLiveScrubSession());
+  const resumeAfterScrubRef = useRef(false);
   // Consume the resume jobId at most once; later param changes start fresh jobs.
   const resumeJobIdRef = useRef<string | null>(resumeJobId ?? null);
   const resumeConsumedRef = useRef(false);
@@ -187,12 +195,6 @@ export default function PreviewPlayer({
     setDurationMs(loadedMs);
   }, []);
 
-  const handleTimeUpdate = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    setCurrentTimeMs(Math.round(video.currentTime * 1000));
-  }, []);
-
   const handleTogglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -206,24 +208,81 @@ export default function PreviewPlayer({
   const handleSeek = useCallback((ms: number) => {
     const video = videoRef.current;
     if (!video) return;
-    const clamped = Math.min(durationMs, Math.max(0, ms));
-    video.currentTime = clamped / 1000;
+    const limit = durationMs > 0 ? durationMs : 0;
+    const clamped = Math.min(limit || ms, Math.max(0, ms));
     setCurrentTimeMs(clamped);
+    if (scrubbingRef.current) {
+      pushLiveScrub(video, scrubSessionRef.current, clamped);
+      return;
+    }
+    if (limit > 0) {
+      video.currentTime = clamped / 1000;
+      const readMs = video.currentTime * 1000;
+      seekHoldRef.current = Math.abs(readMs - clamped) <= 250 ? null : clamped;
+    }
   }, [durationMs]);
+
+  const beginScrub = useCallback(() => {
+    const video = videoRef.current;
+    scrubbingRef.current = true;
+    if (!video) return;
+    resumeAfterScrubRef.current = !video.paused && !video.ended;
+    video.pause();
+  }, []);
+
+  const endScrub = useCallback(() => {
+    const video = videoRef.current;
+    if (video) flushLiveScrub(video, scrubSessionRef.current);
+    scrubbingRef.current = false;
+    if (resumeAfterScrubRef.current && video) void video.play();
+    resumeAfterScrubRef.current = false;
+  }, []);
 
   const handleSkip = useCallback(
     (deltaMs: number) => {
-      handleSeek(currentTimeMs + deltaMs);
+      const video = videoRef.current;
+      const base = video ? video.currentTime * 1000 : currentTimeMs;
+      handleSeek(base + deltaMs);
     },
     [currentTimeMs, handleSeek]
   );
 
-  const getTimelineValue = (clientX: number) => {
-    if (!timelineRef.current || durationMs <= 0) return 0;
-    const rect = timelineRef.current.getBoundingClientRect();
-    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    return ratio * durationMs;
-  };
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !previewUrl) return;
+
+    let frame = 0;
+    let lastPublish = 0;
+    const publish = (force: boolean) => {
+      if (scrubbingRef.current) return;
+      const ms = video.currentTime * 1000;
+      const hold = seekHoldRef.current;
+      if (hold != null) {
+        const ahead = ms - hold;
+        const caughtUp = Math.abs(ahead) <= 250 || (ahead > 0 && ahead < 700);
+        if (caughtUp) seekHoldRef.current = null;
+        else return;
+      }
+      const now = performance.now();
+      if (!force && now - lastPublish < 32) return;
+      lastPublish = now;
+      const rounded = Math.round(ms);
+      setCurrentTimeMs((prev) => (prev === rounded ? prev : rounded));
+    };
+
+    const onSeeked = () => publish(true);
+    video.addEventListener("seeked", onSeeked);
+    const tick = () => {
+      if (!video.paused && !video.ended) publish(false);
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      video.removeEventListener("seeked", onSeeked);
+    };
+  }, [previewUrl]);
 
   const speedLabel = getExportSpeedLabel(exportSpeed);
 
@@ -268,10 +327,9 @@ export default function PreviewPlayer({
             <video
               ref={videoRef}
               src={previewUrl}
-              className="w-full h-full"
+              className="relative z-0 h-full w-full object-contain"
               playsInline
               onLoadedMetadata={handleLoadedMetadata}
-              onTimeUpdate={handleTimeUpdate}
               onPlay={() => setIsPlaying(true)}
               onPause={() => setIsPlaying(false)}
               onEnded={() => {
@@ -281,69 +339,26 @@ export default function PreviewPlayer({
                 void video.play();
               }}
             />
-          </div>
-
-          <div className="glass-panel p-4 flex flex-col gap-3">
-            <div className="flex items-center gap-3">
-              <div className="flex-1">
-                <input
-                  type="range"
-                  min={0}
-                  max={durationMs || 1}
-                  value={Math.min(currentTimeMs, durationMs || 0)}
-                  onChange={(e) => handleSeek(Number(e.target.value))}
-                  onPointerDown={(e) => handleSeek(getTimelineValue(e.clientX))}
-                  className="w-full playback-range"
-                  aria-label="Preview playback timeline"
-                  ref={timelineRef}
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleSkip(-5000)}
-                  className="btn-secondary px-3 py-2 text-sm"
-                  aria-label="Skip back 5 seconds"
-                >
-                  -5s
-                </button>
-                <button
-                  type="button"
-                  onClick={handleTogglePlay}
-                  className="btn-primary px-4 py-2"
-                  aria-label={isPlaying ? "Pause" : "Play"}
-                >
-                  {isPlaying ? (
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
-                    </svg>
-                  ) : (
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M8 5v14l11-7z" />
-                    </svg>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSkip(5000)}
-                  className="btn-secondary px-3 py-2 text-sm"
-                  aria-label="Skip forward 5 seconds"
-                >
-                  +5s
-                </button>
-              </div>
-
-              <div className="text-sm font-mono text-gray-300">
-                <span className="text-white">{formatTimeDisplay(currentTimeMs)}</span>
-                <span className="text-gray-500"> / </span>
-                <span>{formatTimeDisplay(durationMs)}</span>
-              </div>
-
-              <VolumeControl volume={volume} onChange={setVolume} />
-            </div>
+            <button
+              type="button"
+              className="absolute inset-0 z-10 cursor-pointer border-0 bg-transparent p-0 outline-none"
+              aria-label={isPlaying ? "Pause" : "Play"}
+              tabIndex={-1}
+              onClick={handleTogglePlay}
+            />
+            <PlayerChrome
+              durationMs={durationMs}
+              currentTimeMs={currentTimeMs}
+              isPlaying={isPlaying}
+              volume={volume}
+              onTogglePlay={handleTogglePlay}
+              onSkip={handleSkip}
+              onSeek={handleSeek}
+              onScrubStart={beginScrub}
+              onScrubEnd={endScrub}
+              onVolumeChange={setVolume}
+              seekLabel="Preview playback position"
+            />
           </div>
         </>
       )}

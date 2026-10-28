@@ -15,12 +15,13 @@ export interface PlayerState {
 export function useYouTubePlayer() {
   const playerRef = useRef<YTPlayer | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const resumeRef = useRef<{
-    baseTimeMs: number;
-    startedAt: number;
-    active: boolean;
-  }>({ baseTimeMs: 0, startedAt: 0, active: false });
-  const RESUME_SMOOTH_MS = 200;
+  const pollLockRef = useRef(false);
+  const seekHoldRef = useRef<{ targetMs: number; startedAt: number } | null>(null);
+  const scrubbingRef = useRef(false);
+  const resumeAfterScrubRef = useRef(false);
+  const scrubLatestRef = useRef<number | null>(null);
+  const scrubTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubSentAtRef = useRef(0);
   const [state, setState] = useState<PlayerState>({
     isPlaying: false,
     isBuffering: false,
@@ -39,43 +40,48 @@ export function useYouTubePlayer() {
 
   const startPoll = useCallback(() => {
     clearPoll();
-    intervalRef.current = setInterval(async () => {
+    intervalRef.current = setInterval(() => {
+      if (pollLockRef.current) return;
       const player = playerRef.current;
       if (!player) return;
-      try {
-        const playerStatePromise = player.getPlayerState();
-        const resumeState = resumeRef.current;
-        let nextTimeMs: number | null = null;
-
-        if (resumeState.active) {
-          const elapsed = performance.now() - resumeState.startedAt;
-          nextTimeMs = resumeState.baseTimeMs + elapsed;
-          if (elapsed >= RESUME_SMOOTH_MS) {
-            resumeState.active = false;
+      pollLockRef.current = true;
+      void (async () => {
+        try {
+          const [playerState, currentTime] = await Promise.all([
+            player.getPlayerState(),
+            player.getCurrentTime(),
+          ]);
+          const reported = (typeof currentTime === "number" ? currentTime : 0) * 1000;
+          const hold = seekHoldRef.current;
+          let nextTimeMs = reported;
+          if (scrubbingRef.current && hold) {
+            nextTimeMs = hold.targetMs;
+          } else if (hold) {
+            const ahead = reported - hold.targetMs;
+            const expired = performance.now() - hold.startedAt > 800;
+            const caughtUp =
+              Math.abs(ahead) <= 250 || (ahead > 0 && ahead < 700);
+            if (caughtUp || expired) {
+              seekHoldRef.current = null;
+              nextTimeMs = reported;
+            } else {
+              nextTimeMs = hold.targetMs;
+            }
           }
+          const isBuffering = playerState === 3;
+          const isPlaying = playerState === 1 || isBuffering;
+          setState((prev) => ({
+            ...prev,
+            currentTime: nextTimeMs,
+            isPlaying,
+            isBuffering,
+          }));
+        } catch {
+          // Player may be unmounted
+        } finally {
+          pollLockRef.current = false;
         }
-
-        if (nextTimeMs === null) {
-          const currentTime = await player.getCurrentTime();
-          nextTimeMs = currentTime * 1000;
-        }
-
-        setState((prev) => ({
-          ...prev,
-          currentTime: nextTimeMs ?? prev.currentTime,
-        }));
-
-        const playerState = await playerStatePromise;
-        const isBuffering = playerState === 3;
-        const isPlaying = playerState === 1 || isBuffering;
-        setState((prev) => ({
-          ...prev,
-          isPlaying,
-          isBuffering,
-        }));
-      } catch {
-        // Player may be unmounted
-      }
+      })();
     }, 33);
   }, [clearPoll]);
 
@@ -108,29 +114,17 @@ export function useYouTubePlayer() {
     (event: { data: number }) => {
       const isBuffering = event.data === 3;
       const isPlaying = event.data === 1 || isBuffering;
-      if (isPlaying && !state.isPlaying) {
-        resumeRef.current = {
-          baseTimeMs: state.currentTime,
-          startedAt: performance.now(),
-          active: true,
-        };
-      }
       setState((prev) => ({ ...prev, isPlaying, isBuffering }));
       if (isPlaying) {
         startPoll();
       }
     },
-    [startPoll, state.currentTime, state.isPlaying]
+    [startPoll]
   );
 
   const play = useCallback(async () => {
-    resumeRef.current = {
-      baseTimeMs: state.currentTime,
-      startedAt: performance.now(),
-      active: true,
-    };
     await playerRef.current?.playVideo();
-  }, [state.currentTime]);
+  }, []);
 
   const pause = useCallback(async () => {
     await playerRef.current?.pauseVideo();
@@ -144,15 +138,55 @@ export function useYouTubePlayer() {
     }
   }, [state.isPlaying, play, pause]);
 
-  const seekTo = useCallback(async (ms: number) => {
-    resumeRef.current = {
-      baseTimeMs: ms,
-      startedAt: performance.now(),
-      active: false,
-    };
-    await playerRef.current?.seekTo(ms / 1000, true);
-    setState((prev) => ({ ...prev, currentTime: ms }));
+  const flushYouTubeScrub = useCallback((force: boolean) => {
+    const player = playerRef.current;
+    const targetMs = scrubLatestRef.current;
+    if (!player || targetMs == null) return;
+    const elapsed = performance.now() - scrubSentAtRef.current;
+    if (!force && elapsed < 50) {
+      if (scrubTimerRef.current == null) {
+        scrubTimerRef.current = setTimeout(() => {
+          scrubTimerRef.current = null;
+          flushYouTubeScrub(true);
+        }, 50 - elapsed);
+      }
+      return;
+    }
+    if (scrubTimerRef.current != null) {
+      clearTimeout(scrubTimerRef.current);
+      scrubTimerRef.current = null;
+    }
+    scrubLatestRef.current = null;
+    scrubSentAtRef.current = performance.now();
+    void player.seekTo(targetMs / 1000, true);
   }, []);
+
+  const seekTo = useCallback(async (ms: number) => {
+    const targetMs = Math.max(0, ms);
+    seekHoldRef.current = { targetMs, startedAt: performance.now() };
+    setState((prev) => ({ ...prev, currentTime: targetMs }));
+    if (scrubbingRef.current) {
+      scrubLatestRef.current = targetMs;
+      flushYouTubeScrub(false);
+      return;
+    }
+    await playerRef.current?.seekTo(targetMs / 1000, true);
+  }, [flushYouTubeScrub]);
+
+  const beginScrub = useCallback(() => {
+    scrubbingRef.current = true;
+    resumeAfterScrubRef.current = state.isPlaying;
+    void playerRef.current?.pauseVideo();
+  }, [state.isPlaying]);
+
+  const endScrub = useCallback(() => {
+    flushYouTubeScrub(true);
+    scrubbingRef.current = false;
+    if (resumeAfterScrubRef.current) {
+      void playerRef.current?.playVideo();
+    }
+    resumeAfterScrubRef.current = false;
+  }, [flushYouTubeScrub]);
 
   const skip = useCallback(
     async (deltaMs: number) => {
@@ -179,6 +213,7 @@ export function useYouTubePlayer() {
 
   const destroy = useCallback(() => {
     clearPoll();
+    seekHoldRef.current = null;
     playerRef.current = null;
     setState({
       isPlaying: false,
@@ -199,6 +234,8 @@ export function useYouTubePlayer() {
     pause,
     togglePlay,
     seekTo,
+    beginScrub,
+    endScrub,
     skip,
     setVolume,
     setDurationMs,
