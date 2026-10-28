@@ -19,7 +19,7 @@ export function getYtDlpAuthMode(): YtDlpAuthMode {
 /**
  * Route yt-dlp egress through a residential/rotating proxy. This is the actual
  * fix for the datacenter-IP "Sign in to confirm you're not a bot" error: it
- * changes the IP YouTube sees, even though the app keeps running on AWS.
+ * changes the IP YouTube sees.
  */
 export function getYtDlpProxyArgs(): string[] {
   const proxy = process.env.YT_DLP_PROXY?.trim();
