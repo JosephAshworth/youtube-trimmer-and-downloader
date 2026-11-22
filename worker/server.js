@@ -21,12 +21,14 @@ if (!existsSync(TMP_DIR)) {
 const COOKIES_PATH = join(__dirname, "cookies.txt");
 if (process.env.YT_DLP_COOKIES_B64) {
   try {
-    const decoded = Buffer.from(process.env.YT_DLP_COOKIES_B64, "base64").toString("utf8");
+    const decoded = Buffer.from(process.env.YT_DLP_COOKIES_B64.trim(), "base64").toString("utf8");
     writeFileSync(COOKIES_PATH, decoded);
-    console.log("Successfully wrote cookies.txt from base64 env var");
+    console.log("Successfully wrote cookies.txt from base64 env var (size: " + decoded.length + " bytes)");
   } catch (e) {
     console.error("Failed to decode YT_DLP_COOKIES_B64:", e);
   }
+} else {
+  console.log("WARNING: YT_DLP_COOKIES_B64 is not set!");
 }
 
 // Health check for Render wakeups
@@ -52,9 +54,14 @@ app.post("/video-info", auth, (req, res) => {
   const args = [];
   if (existsSync(COOKIES_PATH)) {
     args.push("--cookies", COOKIES_PATH);
+    console.log("Using cookies file at:", COOKIES_PATH);
+  } else {
+    console.log("WARNING: cookies.txt not found at:", COOKIES_PATH);
   }
 
   args.push(
+    "--extractor-args",
+    "youtube:player_client=android,web",
     "--skip-download",
     "--print",
     '{"id":%(id)j,"title":%(title)j,"duration":%(duration)j,"thumbnail":%(thumbnail)j,"uploader":%(uploader)j}',
@@ -119,6 +126,8 @@ app.post("/download", auth, (req, res) => {
   }
 
   args.push(
+    "--extractor-args",
+    "youtube:player_client=android,web",
     "-f",
     formatArg,
     "--merge-output-format",
