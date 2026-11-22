@@ -1,0 +1,19 @@
+{
+  "services": [
+    {
+      "type": "web",
+      "name": "yt-dlp-worker",
+      "env": "docker",
+      "region": "oregon",
+      "plan": "free",
+      "rootDir": "worker",
+      "autoDeploy": true,
+      "envVars": [
+        {
+          "key": "YTDLP_WORKER_API_KEY",
+          "generateValue": true
+        }
+      ]
+    }
+  ]
+}

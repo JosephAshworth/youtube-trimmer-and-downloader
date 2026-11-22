@@ -31,12 +31,7 @@ export function getYtDlpAuthArgs(): string[] {
   const proxyArgs = getYtDlpProxyArgs();
 
   const cookiesFile = process.env.YT_DLP_COOKIES_FILE?.trim();
-  if (cookiesFile) {
-    if (!existsSync(cookiesFile)) {
-      throw new Error(
-        `YT_DLP_COOKIES_FILE is set but file not found: ${cookiesFile}`
-      );
-    }
+  if (cookiesFile && existsSync(cookiesFile)) {
     return [...proxyArgs, "--cookies", cookiesFile];
   }
 
