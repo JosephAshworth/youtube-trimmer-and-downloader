@@ -17,6 +17,18 @@ if (!existsSync(TMP_DIR)) {
   mkdirSync(TMP_DIR, { recursive: true });
 }
 
+// Write cookies.txt if YT_DLP_COOKIES_B64 is provided
+const COOKIES_PATH = join(__dirname, "cookies.txt");
+if (process.env.YT_DLP_COOKIES_B64) {
+  try {
+    const decoded = Buffer.from(process.env.YT_DLP_COOKIES_B64, "base64").toString("utf8");
+    writeFileSync(COOKIES_PATH, decoded);
+    console.log("Successfully wrote cookies.txt from base64 env var");
+  } catch (e) {
+    console.error("Failed to decode YT_DLP_COOKIES_B64:", e);
+  }
+}
+
 // Health check for Render wakeups
 app.get("/", (req, res) => {
   res.status(200).send("YT-Dlp Worker is online");
@@ -37,14 +49,19 @@ app.post("/video-info", auth, (req, res) => {
     return res.status(400).json({ error: "Missing url parameter" });
   }
 
-  const args = [
+  const args = [];
+  if (existsSync(COOKIES_PATH)) {
+    args.push("--cookies", COOKIES_PATH);
+  }
+
+  args.push(
     "--skip-download",
     "--print",
     '{"id":%(id)j,"title":%(title)j,"duration":%(duration)j,"thumbnail":%(thumbnail)j,"uploader":%(uploader)j}',
     "--no-playlist",
     "--no-warnings",
-    url,
-  ];
+    url
+  );
 
   execFile("yt-dlp", args, { timeout: 60000 }, (error, stdout, stderr) => {
     if (error) {
@@ -92,7 +109,12 @@ app.post("/download", auth, (req, res) => {
   const endTimestamp = msToFfmpegTimestamp(endTime * 1000);
 
   const formatArg = "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best";
-  const args = [
+  const args = [];
+  if (existsSync(COOKIES_PATH)) {
+    args.push("--cookies", COOKIES_PATH);
+  }
+
+  args.push(
     "-f",
     formatArg,
     "--merge-output-format",
@@ -102,8 +124,8 @@ app.post("/download", auth, (req, res) => {
     "--force-keyframes-at-cuts",
     "-o",
     rawDownloadPath,
-    url,
-  ];
+    url
+  );
 
   console.log(`Starting yt-dlp job ${jobUuid}: ${args.join(" ")}`);
 

@@ -9,3 +9,5 @@ services:
     envVars:
       - key: YTDLP_WORKER_API_KEY
         value: "my-super-secret-fixed-key-12345"
+      - key: YT_DLP_COOKIES_B64
+        sync: false
