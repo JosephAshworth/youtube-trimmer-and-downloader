@@ -17,6 +17,11 @@ if (!existsSync(TMP_DIR)) {
   mkdirSync(TMP_DIR, { recursive: true });
 }
 
+// Health check for Render wakeups
+app.get("/", (req, res) => {
+  res.status(200).send("YT-Dlp Worker is online");
+});
+
 // Authentication middleware
 function auth(req, res, next) {
   const key = req.headers["x-api-key"];
