@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
-RUN apk add --no-cache python3 py3-pip ffmpeg
-RUN pip3 install --break-system-packages "yt-dlp>=2026.3.17"
+RUN apk add --no-cache python3 py3-pip ffmpeg curl
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp
 
 WORKDIR /app
 
