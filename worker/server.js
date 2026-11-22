@@ -63,10 +63,13 @@ app.post("/video-info", auth, (req, res) => {
     url
   );
 
+  console.log("Running yt-dlp with args:", args);
+
   execFile("yt-dlp", args, { timeout: 60000 }, (error, stdout, stderr) => {
     if (error) {
       console.error("yt-dlp error:", error);
-      return res.status(500).json({ error: error.message || stderr });
+      console.error("yt-dlp stderr:", stderr);
+      return res.status(500).json({ error: stderr || error.message });
     }
 
     try {
@@ -76,7 +79,7 @@ app.post("/video-info", auth, (req, res) => {
         .find((l) => l.startsWith("{") && l.endsWith("}"));
 
       if (!line) {
-        throw new Error("No metadata returned");
+        throw new Error("No metadata returned. Stdout: " + stdout);
       }
 
       const data = JSON.parse(line);
@@ -89,7 +92,8 @@ app.post("/video-info", auth, (req, res) => {
         uploader: data.uploader || "Unknown",
       });
     } catch (parseError) {
-      res.status(500).json({ error: "Failed to parse metadata: " + parseError.message });
+      console.error("Parse error:", parseError, "Stdout was:", stdout);
+      res.status(500).json({ error: "Failed to parse metadata: " + parseError.message + " | Output: " + stdout });
     }
   });
 });
@@ -131,10 +135,16 @@ app.post("/download", auth, (req, res) => {
 
   const child = spawn("yt-dlp", args);
 
+  let stderrOutput = "";
+  child.stderr.on("data", (chunk) => {
+    stderrOutput += chunk.toString();
+  });
+
   child.on("close", (code) => {
     if (code !== 0) {
+      console.error(`yt-dlp failed with code ${code}. Stderr: ${stderrOutput}`);
       cleanup([rawDownloadPath, finalOutputPath]);
-      return res.status(500).json({ error: `yt-dlp download failed with exit code ${code}` });
+      return res.status(500).json({ error: `yt-dlp download failed: ${stderrOutput.trim() || code}` });
     }
 
     console.log(`Download finished for job ${jobUuid}. Post-processing (speed: ${speed})...`);
@@ -161,7 +171,7 @@ app.post("/download", auth, (req, res) => {
       .on("error", (err) => {
         console.error("FFmpeg error:", err);
         cleanup([rawDownloadPath, finalOutputPath]);
-        res.status(500).json({ error: "FFmpeg processing failed: " + err.message });
+        res.status(500).json({ error: "FFmpeg processing fixed: " + err.message });
       })
       .run();
   });
@@ -185,7 +195,7 @@ function msToFfmpegTimestamp(ms) {
   const milli = ms % 1000;
 
   const pad = (num, size = 2) => String(num).padStart(size, "0");
-  return `${pad(hours)}:${pad(minutes)}:${pad(remainingSecs)}.${pad(milli, 3)}`;
+  return `${pad(hours)}:${pad(minutes)}:${pad(remainingSecs)}:${pad(milli, 3)}`;
 }
 
 app.listen(PORT, () => {
