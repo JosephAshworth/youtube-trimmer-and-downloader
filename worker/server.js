@@ -54,14 +54,11 @@ app.post("/video-info", auth, (req, res) => {
   const args = [];
   if (existsSync(COOKIES_PATH)) {
     args.push("--cookies", COOKIES_PATH);
-    console.log("Using cookies file at:", COOKIES_PATH);
-  } else {
-    console.log("WARNING: cookies.txt not found at:", COOKIES_PATH);
   }
 
   args.push(
     "--extractor-args",
-    "youtube:player_client=android,web",
+    "youtube:player_client=tv,web",
     "--skip-download",
     "--print",
     '{"id":%(id)j,"title":%(title)j,"duration":%(duration)j,"thumbnail":%(thumbnail)j,"uploader":%(uploader)j}',
@@ -127,7 +124,7 @@ app.post("/download", auth, (req, res) => {
 
   args.push(
     "--extractor-args",
-    "youtube:player_client=android,web",
+    "youtube:player_client=tv,web",
     "-f",
     formatArg,
     "--merge-output-format",
