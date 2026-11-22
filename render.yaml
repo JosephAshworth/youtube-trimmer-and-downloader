@@ -8,4 +8,4 @@ services:
     autoDeploy: true
     envVars:
       - key: YTDLP_WORKER_API_KEY
-        generateValue: true
+        value: "my-super-secret-fixed-key-12345"
